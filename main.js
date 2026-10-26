@@ -2,55 +2,65 @@ import * as THREE from
   "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js";
 
 // ============================================================
-// MOSQUITO SENSORY V6
+// MOSQUITO SENSORY V8
+// Purple / magenta environment with orange / yellow hosts.
 //
-// Artistic passthrough overlays, not genuine thermal sensing.
-// Host signatures are manually placed and remain stationary.
-// All distances are in metres.
+// Passthrough remains visible beneath artistic graphics.
+// This does not process camera pixels or detect real people.
+// Hosts are manually placed and remain stationary.
 // ============================================================
 
 const CONFIG = {
-  version: "SENSORY V6",
+  version: "SENSORY V8",
+
   placementDistance: 1.0,
   stingDistance: 2.0,
   acquisitionSeconds: 0.35,
   cooldownSeconds: 0.9,
   maximumHosts: 6,
+
   environmentParticles: 180,
   scentParticles: 40,
-  visorOpacity: 0.075,
+
+  // Reduce this if the room becomes difficult to see.
+  filterOpacity: 0.85,
+
   showFloorRipples: true
 };
 
 const COLOR = {
-  blue: 0x263fa3,
-  violet: 0x773cc4,
-  magenta: 0xed2875,
-  orange: 0xff7935,
-  cream: 0xfff0b3
+  purple: 0x6815b5,
+  violet: 0xa020f0,
+  magenta: 0xff1493,
+  orange: 0xff8500,
+  yellow: 0xffeb70
 };
 
-// Reuse the elements from your existing index.html.
+// ============================================================
+// PAGE ELEMENTS
+// Uses the IDs from your existing index.html.
+// ============================================================
+
 const startButton = document.getElementById("start");
 const statusText = document.getElementById("status");
 const panel = document.getElementById("panel");
 
 if (!startButton || !statusText || !panel) {
   throw new Error(
-    "index.html must contain elements with IDs: start, status, panel."
+    "index.html needs elements with IDs: start, status, panel."
   );
 }
 
 startButton.disabled = true;
-startButton.textContent = "Loading sensory vision…";
-statusText.textContent = `${CONFIG.version} is loading.`;
+startButton.textContent = "Loading Sensory V8…";
+statusText.textContent = "Preparing mosquito sensory vision.";
 
 // ============================================================
-// SCENE AND TRANSPARENT RENDERER
+// SCENE
+// Never add an opaque scene.background in this AR experience.
 // ============================================================
 
 const scene = new THREE.Scene();
-// Do not add an opaque scene.background.
 
 const camera = new THREE.PerspectiveCamera(
   70,
@@ -94,19 +104,19 @@ const rayRotation = new THREE.Matrix4();
 const tempPosition = new THREE.Vector3();
 const inverseHeadRotation = new THREE.Quaternion();
 
+const PATCH_OFFSET = new THREE.Vector3(-0.12, 0.22, 0.22);
+
 let activeSession = null;
 let needsInitialHosts = false;
 let previousTime = null;
 let now = 0;
+
 let stingCount = 0;
 let proboscisUntil = 0;
 
 let feedback = "";
 let feedbackUntil = 0;
 let lastHUDKey = "";
-
-// The sting patch is positioned at the upper-left torso.
-const PATCH_OFFSET = new THREE.Vector3(-0.12, 0.22, 0.22);
 
 // ============================================================
 // HELPERS
@@ -118,7 +128,8 @@ function transparentMaterial(color, opacity) {
     opacity,
     transparent: true,
     side: THREE.DoubleSide,
-    depthWrite: false
+    depthWrite: false,
+    toneMapped: false
   });
 }
 
@@ -141,109 +152,177 @@ function makeCanvasTexture(width, height, draw) {
   return texture;
 }
 
-const particleTexture = makeCanvasTexture(64, 64, (context) => {
-  const gradient = context.createRadialGradient(
-    32, 32, 0,
-    32, 32, 32
-  );
-
-  gradient.addColorStop(0, "rgba(255,255,255,1)");
-  gradient.addColorStop(0.25, "rgba(255,255,255,0.7)");
-  gradient.addColorStop(1, "rgba(255,255,255,0)");
-
-  context.fillStyle = gradient;
-  context.fillRect(0, 0, 64, 64);
-});
-
 function showFeedback(message, seconds = 1.2) {
   feedback = message;
   feedbackUntil = now + seconds;
 }
 
+const particleTexture = makeCanvasTexture(
+  64,
+  64,
+  (context) => {
+    const gradient = context.createRadialGradient(
+      32, 32, 0,
+      32, 32, 32
+    );
+
+    gradient.addColorStop(0, "rgba(255,255,255,1)");
+    gradient.addColorStop(0.25, "rgba(255,255,255,0.75)");
+    gradient.addColorStop(1, "rgba(255,255,255,0)");
+
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, 64, 64);
+  }
+);
+
 // ============================================================
-// COOL SENSORY VISOR
-// This tints the view; it does not process camera pixels.
+// MULTICOLOUR SENSORY FILTER
+// View-attached artistic gradient, not camera processing.
 // ============================================================
 
+const filterTexture = makeCanvasTexture(
+  1024,
+  1024,
+  (context) => {
+    // Purple base across the view.
+    context.fillStyle = "rgba(85, 5, 145, 0.27)";
+    context.fillRect(0, 0, 1024, 1024);
+
+    function glow(x, y, radius, red, green, blue, alpha) {
+      const gradient = context.createRadialGradient(
+        x, y, 0,
+        x, y, radius
+      );
+
+      gradient.addColorStop(
+        0,
+        `rgba(${red},${green},${blue},${alpha})`
+      );
+
+      gradient.addColorStop(
+        1,
+        `rgba(${red},${green},${blue},0)`
+      );
+
+      context.fillStyle = gradient;
+      context.fillRect(0, 0, 1024, 1024);
+    }
+
+    // Broad magenta regions.
+    glow(270, 460, 530, 255, 10, 155, 0.38);
+    glow(770, 390, 510, 230, 10, 180, 0.34);
+
+    // Purple upper region.
+    glow(510, 200, 520, 115, 10, 220, 0.26);
+
+    // Orange lower peripheral regions.
+    glow(270, 790, 330, 255, 100, 0, 0.32);
+    glow(770, 790, 330, 255, 125, 0, 0.32);
+
+    // Smaller yellow highlights.
+    glow(300, 900, 210, 255, 230, 35, 0.24);
+    glow(730, 900, 210, 255, 230, 35, 0.24);
+  }
+);
+
 const visor = new THREE.Mesh(
-  new THREE.PlaneGeometry(4, 4),
-  transparentMaterial(COLOR.blue, CONFIG.visorOpacity)
+  new THREE.PlaneGeometry(2.8, 2.8),
+  new THREE.MeshBasicMaterial({
+    map: filterTexture,
+    transparent: true,
+    opacity: CONFIG.filterOpacity,
+    depthTest: false,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    toneMapped: false
+  })
 );
 
 visor.position.z = -1.05;
-visor.material.depthTest = false;
-visor.renderOrder = 100;
+
+// Draw before the virtual hosts so their warm colours stay clear.
+visor.renderOrder = -100;
+visor.frustumCulled = false;
+
 camera.add(visor);
 
 // ============================================================
-// COMPOUND-EYE OVERLAY
-// Stronger around the periphery; clearer in the centre.
+// COMPOUND-EYE PATTERN
+// A stylised hexagonal frame, not optical image duplication.
 // ============================================================
 
-const eyeTexture = makeCanvasTexture(1024, 1024, (context) => {
-  const gradient = context.createRadialGradient(
-    512, 512, 150,
-    512, 512, 720
-  );
+const eyeTexture = makeCanvasTexture(
+  1024,
+  1024,
+  (context) => {
+    const gradient = context.createRadialGradient(
+      512, 512, 160,
+      512, 512, 710
+    );
 
-  gradient.addColorStop(0, "rgba(25,10,50,0)");
-  gradient.addColorStop(0.5, "rgba(65,20,110,0.06)");
-  gradient.addColorStop(1, "rgba(65,20,110,0.30)");
+    gradient.addColorStop(0, "rgba(50,5,90,0)");
+    gradient.addColorStop(0.6, "rgba(75,10,110,0.04)");
+    gradient.addColorStop(1, "rgba(90,5,130,0.20)");
 
-  context.fillStyle = gradient;
-  context.fillRect(0, 0, 1024, 1024);
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, 1024, 1024);
 
-  const radius = 48;
-  const hexHeight = Math.sqrt(3) * radius;
+    const radius = 43;
+    const height = Math.sqrt(3) * radius;
 
-  context.lineWidth = 1.8;
+    context.lineWidth = 1.6;
 
-  for (let column = -1; column < 17; column++) {
-    for (let row = -1; row < 15; row++) {
-      const x = column * radius * 1.5;
-      const y =
-        row * hexHeight +
-        (Math.abs(column % 2) === 1 ? hexHeight / 2 : 0);
+    for (let column = -1; column < 19; column++) {
+      for (let row = -1; row < 16; row++) {
+        const x = column * radius * 1.5;
 
-      const distance = Math.hypot(x - 512, y - 512);
-      const strength = Math.min(1, distance / 650);
-      const alpha = 0.045 + strength * 0.20;
+        const y =
+          row * height +
+          (Math.abs(column % 2) === 1 ? height / 2 : 0);
 
-      context.strokeStyle =
-        `rgba(190,125,255,${alpha})`;
+        const distance = Math.hypot(x - 512, y - 512);
+        const edge = Math.min(1, distance / 600);
+        const alpha = 0.025 + edge * 0.21;
 
-      context.beginPath();
+        context.strokeStyle =
+          `rgba(255,115,220,${alpha})`;
 
-      for (let corner = 0; corner < 6; corner++) {
-        const angle = corner * Math.PI / 3;
-        const px = x + Math.cos(angle) * radius;
-        const py = y + Math.sin(angle) * radius;
+        context.beginPath();
 
-        if (corner === 0) {
-          context.moveTo(px, py);
-        } else {
-          context.lineTo(px, py);
+        for (let corner = 0; corner < 6; corner++) {
+          const angle = corner * Math.PI / 3;
+          const px = x + Math.cos(angle) * radius;
+          const py = y + Math.sin(angle) * radius;
+
+          if (corner === 0) {
+            context.moveTo(px, py);
+          } else {
+            context.lineTo(px, py);
+          }
         }
-      }
 
-      context.closePath();
-      context.stroke();
+        context.closePath();
+        context.stroke();
+      }
     }
   }
-});
+);
 
 const compoundEye = new THREE.Mesh(
-  new THREE.PlaneGeometry(4, 4),
+  new THREE.PlaneGeometry(2.8, 2.8),
   new THREE.MeshBasicMaterial({
     map: eyeTexture,
     transparent: true,
     depthTest: false,
-    depthWrite: false
+    depthWrite: false,
+    toneMapped: false
   })
 );
 
 compoundEye.position.z = -1.02;
-compoundEye.renderOrder = 101;
+compoundEye.renderOrder = 100;
+compoundEye.frustumCulled = false;
+
 camera.add(compoundEye);
 
 // ============================================================
@@ -262,11 +341,13 @@ function makeHeadLine(points, color) {
       transparent: true,
       opacity: 0.5,
       depthTest: false,
-      depthWrite: false
+      depthWrite: false,
+      toneMapped: false
     })
   );
 
   line.renderOrder = 110;
+  line.frustumCulled = false;
   camera.add(line);
 
   return line;
@@ -295,7 +376,7 @@ const proboscis = makeHeadLine(
     [0, -0.13, -0.3],
     [0, -0.08, -0.6]
   ],
-  COLOR.cream
+  COLOR.yellow
 );
 
 // ============================================================
@@ -309,7 +390,7 @@ hudCanvas.height = 256;
 const hudContext = hudCanvas.getContext("2d");
 
 if (!hudContext) {
-  throw new Error("Could not create HUD.");
+  throw new Error("Could not create the headset HUD.");
 }
 
 const hudTexture = new THREE.CanvasTexture(hudCanvas);
@@ -321,26 +402,29 @@ const hud = new THREE.Mesh(
     map: hudTexture,
     transparent: true,
     depthTest: false,
-    depthWrite: false
+    depthWrite: false,
+    toneMapped: false
   })
 );
 
 hud.position.set(0, -0.30, -1);
 hud.renderOrder = 120;
+hud.frustumCulled = false;
 camera.add(hud);
 
 function updateHUD(message) {
   const key = `${stingCount}|${message}`;
+
   if (key === lastHUDKey) return;
   lastHUDKey = key;
 
   hudContext.clearRect(0, 0, 1024, 256);
 
-  hudContext.fillStyle = "rgba(16,10,46,0.78)";
+  hudContext.fillStyle = "rgba(40,4,65,0.80)";
   hudContext.fillRect(0, 0, 1024, 256);
 
   hudContext.textAlign = "center";
-  hudContext.fillStyle = "#FFF0B3";
+  hudContext.fillStyle = "#FFEB70";
   hudContext.font = "bold 50px sans-serif";
 
   hudContext.fillText(
@@ -349,27 +433,34 @@ function updateHUD(message) {
     85
   );
 
-  hudContext.fillStyle = "#E8DCFF";
-  hudContext.font = "30px sans-serif";
+  hudContext.fillStyle = "#FFD6F2";
+  hudContext.font = "29px sans-serif";
   hudContext.fillText(message, 512, 145);
 
-  // Decorative reservoir: fills over groups of ten stings.
   const fill = stingCount === 0
     ? 0
     : (((stingCount - 1) % 10) + 1) / 10;
 
-  hudContext.fillStyle = "#382455";
+  hudContext.fillStyle = "#66205F";
   hudContext.fillRect(212, 190, 600, 16);
 
-  hudContext.fillStyle = "#FF7935";
+  const barGradient = hudContext.createLinearGradient(
+    212, 0, 812, 0
+  );
+
+  barGradient.addColorStop(0, "#FF1493");
+  barGradient.addColorStop(0.5, "#FF8500");
+  barGradient.addColorStop(1, "#FFEB70");
+
+  hudContext.fillStyle = barGradient;
   hudContext.fillRect(212, 190, 600 * fill, 16);
 
   hudTexture.needsUpdate = true;
 }
 
 // ============================================================
-// ENVIRONMENTAL PARTICLES AND FLOOR RIPPLE GRAPHICS
-// These do not scan or reconstruct the real room.
+// ENVIRONMENTAL SENSORY PARTICLES
+// Fictional spatial atmosphere, not room reconstruction.
 // ============================================================
 
 const environment = new THREE.Group();
@@ -379,7 +470,17 @@ const environmentPositions = new Float32Array(
   CONFIG.environmentParticles * 3
 );
 
+const environmentColors = new Float32Array(
+  CONFIG.environmentParticles * 3
+);
+
 const environmentSeeds = [];
+
+const particlePalette = [
+  new THREE.Color(COLOR.violet),
+  new THREE.Color(COLOR.magenta),
+  new THREE.Color(COLOR.orange)
+];
 
 for (let i = 0; i < CONFIG.environmentParticles; i++) {
   environmentSeeds.push({
@@ -388,6 +489,13 @@ for (let i = 0; i < CONFIG.environmentParticles; i++) {
     z: (Math.random() - 0.5) * 7,
     phase: Math.random() * Math.PI * 2
   });
+
+  // Mostly purple/magenta, with occasional orange particles.
+  const chosen = particlePalette[
+    i % 10 === 0 ? 2 : i % 2
+  ];
+
+  chosen.toArray(environmentColors, i * 3);
 }
 
 const environmentGeometry = new THREE.BufferGeometry();
@@ -397,16 +505,22 @@ environmentGeometry.setAttribute(
   new THREE.BufferAttribute(environmentPositions, 3)
 );
 
+environmentGeometry.setAttribute(
+  "color",
+  new THREE.BufferAttribute(environmentColors, 3)
+);
+
 const environmentPoints = new THREE.Points(
   environmentGeometry,
   new THREE.PointsMaterial({
-    color: COLOR.violet,
+    vertexColors: true,
     map: particleTexture,
     size: 0.045,
-    opacity: 0.45,
+    opacity: 0.50,
     transparent: true,
     depthWrite: false,
-    sizeAttenuation: true
+    sizeAttenuation: true,
+    toneMapped: false
   })
 );
 
@@ -419,7 +533,10 @@ if (CONFIG.showFloorRipples) {
   for (let i = 0; i < 3; i++) {
     const ring = new THREE.Mesh(
       new THREE.RingGeometry(0.98, 1, 64),
-      transparentMaterial(COLOR.violet, 0.10)
+      transparentMaterial(
+        i === 1 ? COLOR.magenta : COLOR.violet,
+        0.10
+      )
     );
 
     ring.rotation.x = -Math.PI / 2;
@@ -431,8 +548,8 @@ if (CONFIG.showFloorRipples) {
 }
 
 // ============================================================
-// FALSE-COLOUR MATERIAL FOR VIRTUAL HOST PARTS
-// The gradient applies ONLY to these virtual meshes.
+// HOT SIGNATURE MATERIAL
+// Applies false colours to virtual host meshes only.
 // ============================================================
 
 function makeHeatMaterial() {
@@ -480,35 +597,35 @@ function makeHeatMaterial() {
 
         heat = clamp(heat, 0.0, 1.0);
 
-        vec3 violet = vec3(0.30, 0.08, 0.55);
-        vec3 magenta = vec3(0.93, 0.16, 0.46);
-        vec3 orange = vec3(1.0, 0.47, 0.21);
-        vec3 cream = vec3(1.0, 0.94, 0.70);
+        vec3 purple = vec3(0.41, 0.03, 0.72);
+        vec3 magenta = vec3(1.0, 0.04, 0.55);
+        vec3 orange = vec3(1.0, 0.38, 0.0);
+        vec3 yellow = vec3(1.0, 0.90, 0.10);
 
         vec3 color = mix(
-          violet,
+          purple,
           magenta,
-          smoothstep(0.0, 0.55, heat)
+          smoothstep(0.0, 0.45, heat)
         );
 
         color = mix(
           color,
           orange,
-          smoothstep(0.45, 0.95, heat)
+          smoothstep(0.40, 0.80, heat)
         );
 
         color = mix(
           color,
-          cream,
-          smoothstep(0.82, 1.0, heat) *
-          (0.25 + uFocus * 0.45)
+          yellow,
+          smoothstep(0.72, 1.0, heat) *
+          (0.65 + uFocus * 0.35)
         );
 
-        color = mix(color, cream, uFlash * 0.7);
+        color = mix(color, yellow, uFlash * 0.8);
 
         float alpha =
-          0.24 +
-          heat * 0.20 +
+          0.25 +
+          heat * 0.23 +
           uFocus * 0.08;
 
         gl_FragColor = vec4(color, alpha);
@@ -519,12 +636,13 @@ function makeHeatMaterial() {
     `,
 
     transparent: true,
-    depthWrite: false
+    depthWrite: false,
+    toneMapped: false
   });
 }
 
 // ============================================================
-// HOST SIGNATURES: HEAD, SHOULDERS, TORSO, ARMS
+// HOST SIGNATURE CREATION AND CLEANUP
 // ============================================================
 
 function disposeHost(host) {
@@ -534,10 +652,14 @@ function disposeHost(host) {
   const materials = new Set();
 
   host.traverse((object) => {
-    if (object.geometry) geometries.add(object.geometry);
+    if (object.geometry) {
+      geometries.add(object.geometry);
+    }
 
     if (Array.isArray(object.material)) {
-      object.material.forEach((material) => materials.add(material));
+      object.material.forEach((material) => {
+        materials.add(material);
+      });
     } else if (object.material) {
       materials.add(object.material);
     }
@@ -546,22 +668,36 @@ function disposeHost(host) {
   geometries.forEach((geometry) => geometry.dispose());
   materials.forEach((material) => material.dispose());
 
-  // Shared particleTexture is intentionally not disposed.
+  // particleTexture is shared and must not be disposed here.
 }
 
 function clearHosts() {
+  for (const controller of controllers) {
+    controller.userData.aimedHost = null;
+    controller.userData.aimTime = 0;
+  }
+
   hosts.forEach(disposeHost);
   hosts.length = 0;
 }
 
 function createHost(stingPosition) {
   if (hosts.length >= CONFIG.maximumHosts) {
-    disposeHost(hosts.shift());
+    const oldest = hosts.shift();
+
+    for (const controller of controllers) {
+      if (controller.userData.aimedHost === oldest) {
+        controller.userData.aimedHost = null;
+        controller.userData.aimTime = 0;
+      }
+    }
+
+    disposeHost(oldest);
   }
 
   const host = new THREE.Group();
 
-  // Face the user when placed; remain stationary afterwards.
+  // Face the user at placement time.
   host.rotation.y = Math.atan2(
     headPosition.x - stingPosition.x,
     headPosition.z - stingPosition.z
@@ -617,20 +753,20 @@ function createHost(stingPosition) {
     host.add(arm);
   }
 
-  // Small bright inner torso.
+  // Warm inner torso.
   const innerTorso = new THREE.Mesh(
     new THREE.CapsuleGeometry(0.10, 0.23, 4, 16),
-    transparentMaterial(COLOR.cream, 0.12)
+    transparentMaterial(COLOR.yellow, 0.15)
   );
 
   innerTorso.position.z = 0.05;
   innerTorso.scale.z = 0.5;
   host.add(innerTorso);
 
-  // Actual interactive sting patch.
+  // Interactive sting patch.
   const patch = new THREE.Mesh(
     new THREE.CircleGeometry(0.10, 32),
-    transparentMaterial(COLOR.magenta, 0.85)
+    transparentMaterial(COLOR.magenta, 0.88)
   );
 
   patch.position.copy(PATCH_OFFSET);
@@ -640,7 +776,7 @@ function createHost(stingPosition) {
 
   const warmPatch = new THREE.Mesh(
     new THREE.CircleGeometry(0.070, 32),
-    transparentMaterial(COLOR.orange, 0.95)
+    transparentMaterial(COLOR.orange, 0.98)
   );
 
   warmPatch.position.z = 0.003;
@@ -648,13 +784,13 @@ function createHost(stingPosition) {
 
   const core = new THREE.Mesh(
     new THREE.CircleGeometry(0.030, 24),
-    transparentMaterial(COLOR.cream, 0.4)
+    transparentMaterial(COLOR.yellow, 0.50)
   );
 
   core.position.z = 0.006;
   patch.add(core);
 
-  // Three rotating acquisition segments.
+  // Three acquisition-ring segments.
   const segments = new THREE.Group();
 
   segments.position.copy(PATCH_OFFSET);
@@ -671,23 +807,23 @@ function createHost(stingPosition) {
         i * Math.PI * 2 / 3,
         Math.PI * 0.48
       ),
-      transparentMaterial(COLOR.magenta, 0.7)
+      transparentMaterial(COLOR.magenta, 0.75)
     );
 
     segments.add(segment);
   }
 
-  // Complete ring means ready.
+  // Closed yellow ring means ready to sting.
   const closedRing = new THREE.Mesh(
     new THREE.RingGeometry(0.125, 0.138, 48),
-    transparentMaterial(COLOR.cream, 0.95)
+    transparentMaterial(COLOR.yellow, 0.98)
   );
 
   closedRing.position.copy(segments.position);
   closedRing.visible = false;
   host.add(closedRing);
 
-  // Sting ripple.
+  // Expanding sting ripple.
   const ripple = new THREE.Mesh(
     new THREE.RingGeometry(0.10, 0.112, 48),
     transparentMaterial(COLOR.orange, 0)
@@ -698,7 +834,7 @@ function createHost(stingPosition) {
   ripple.visible = false;
   host.add(ripple);
 
-  // Scent trail.
+  // Scent particles.
   const scentPositions = new Float32Array(
     CONFIG.scentParticles * 3
   );
@@ -716,10 +852,11 @@ function createHost(stingPosition) {
       color: COLOR.magenta,
       map: particleTexture,
       size: 0.06,
-      opacity: 0.75,
+      opacity: 0.78,
       transparent: true,
       depthWrite: false,
-      sizeAttenuation: true
+      sizeAttenuation: true,
+      toneMapped: false
     })
   );
 
@@ -735,6 +872,7 @@ function createHost(stingPosition) {
     ripple,
     scent,
     scentPositions,
+
     focus: 0,
     aimed: false,
     ready: false,
@@ -748,12 +886,12 @@ function createHost(stingPosition) {
   return host;
 }
 
-// Desktop preview. These are replaced when XR starts.
+// Desktop preview signatures.
 createHost(new THREE.Vector3(-0.45, 1.4, -1.4));
 createHost(new THREE.Vector3(0.45, 1.4, -1.4));
 
 // ============================================================
-// CONTROLLER RAYS AND STING INTERACTION
+// CONTROLLER INTERACTION
 // ============================================================
 
 function setControllerRay(controller) {
@@ -773,7 +911,10 @@ function setControllerRay(controller) {
 }
 
 function getControllerHit(controller) {
-  if (!controller.visible || !controller.userData.inputSource) {
+  if (
+    !controller.visible ||
+    !controller.userData.inputSource
+  ) {
     return null;
   }
 
@@ -786,7 +927,12 @@ function getControllerHit(controller) {
 }
 
 function placeHost(controller) {
-  if (!renderer.xr.isPresenting || !controller.visible) return;
+  if (
+    !renderer.xr.isPresenting ||
+    !controller.visible
+  ) {
+    return;
+  }
 
   setControllerRay(controller);
 
@@ -796,6 +942,7 @@ function placeHost(controller) {
   );
 
   createHost(position);
+
   showFeedback("Host placed — aim at the orange patch.");
 }
 
@@ -817,7 +964,6 @@ function sting(controller) {
     return;
   }
 
-  // This specific controller must have acquired the host.
   if (
     controller.userData.aimedHost !== host ||
     controller.userData.aimTime < CONFIG.acquisitionSeconds
@@ -841,15 +987,18 @@ function sting(controller) {
 
   showFeedback("Sting collected!");
 
+  // Optional vibration.
   const actuator =
     controller.userData.inputSource
       ?.gamepad?.hapticActuators?.[0];
 
   if (actuator) {
     try {
-      Promise.resolve(actuator.pulse(0.45, 90)).catch(() => {});
+      Promise.resolve(
+        actuator.pulse(0.45, 90)
+      ).catch(() => {});
     } catch {
-      // Optional vibration must not interrupt the app.
+      // Vibration failure must not interrupt the experience.
     }
   }
 }
@@ -869,6 +1018,7 @@ for (let i = 0; i < 2; i++) {
     controller.userData.inputSource = null;
     controller.userData.aimedHost = null;
     controller.userData.aimTime = 0;
+    controller.userData.aimDot.visible = false;
   });
 
   controller.addEventListener("selectstart", () => {
@@ -879,27 +1029,29 @@ for (let i = 0; i < 2; i++) {
     placeHost(controller);
   });
 
-  // Short pointer instead of a long shooting-style laser.
+  // Short pointing line.
   const pointer = new THREE.Line(
     new THREE.BufferGeometry().setFromPoints([
       new THREE.Vector3(0, 0, 0),
       new THREE.Vector3(0, 0, -0.18)
     ]),
     new THREE.LineBasicMaterial({
-      color: COLOR.cream,
+      color: COLOR.yellow,
       transparent: true,
-      opacity: 0.75
+      opacity: 0.8,
+      toneMapped: false
     })
   );
 
   controller.add(pointer);
 
-  // World-space dot appears when a patch is hit.
+  // A small dot appears on a patch when aimed at.
   const aimDot = new THREE.Mesh(
     new THREE.SphereGeometry(0.008, 10, 8),
     new THREE.MeshBasicMaterial({
-      color: COLOR.cream,
-      depthTest: false
+      color: COLOR.yellow,
+      depthTest: false,
+      toneMapped: false
     })
   );
 
@@ -958,7 +1110,9 @@ function updateAiming(delta) {
 
     dot.visible = Boolean(hit);
 
-    if (hit) dot.position.copy(hit.point);
+    if (hit) {
+      dot.position.copy(hit.point);
+    }
 
     if (controller.userData.aimedHost !== host) {
       controller.userData.aimedHost = host;
@@ -971,6 +1125,7 @@ function updateAiming(delta) {
     }
 
     const data = host.userData;
+
     const recovering =
       now - data.lastStung < CONFIG.cooldownSeconds;
 
@@ -982,7 +1137,8 @@ function updateAiming(delta) {
 
     const focus = Math.min(
       1,
-      controller.userData.aimTime / CONFIG.acquisitionSeconds
+      controller.userData.aimTime /
+        CONFIG.acquisitionSeconds
     );
 
     data.aimed = true;
@@ -998,45 +1154,63 @@ function updateHost(host, time) {
   const recovering = age < CONFIG.cooldownSeconds;
   const flash = Math.max(0, 1 - age / 0.45);
 
-  data.heatMaterial.uniforms.uTime.value = time + data.phase;
+  data.heatMaterial.uniforms.uTime.value =
+    time + data.phase;
+
   data.heatMaterial.uniforms.uFocus.value = data.focus;
   data.heatMaterial.uniforms.uFlash.value = flash;
 
-  data.patch.material.opacity = recovering ? 0.35 : 0.85;
-  data.core.material.opacity = 0.35 + data.focus * 0.65;
+  data.patch.material.opacity =
+    recovering ? 0.35 : 0.88;
+
+  data.core.material.opacity =
+    0.45 + data.focus * 0.55;
 
   data.segments.visible = !data.ready;
   data.closedRing.visible = data.ready;
 
   data.segments.rotation.z = time * 0.4;
-  data.segments.scale.setScalar(1.3 - data.focus * 0.3);
+
+  data.segments.scale.setScalar(
+    1.3 - data.focus * 0.3
+  );
 
   for (const segment of data.segments.children) {
     segment.material.color.setHex(
       data.aimed ? COLOR.orange : COLOR.magenta
     );
 
-    segment.material.opacity = recovering ? 0.2 : 0.75;
+    segment.material.opacity =
+      recovering ? 0.2 : 0.8;
   }
 
   data.ripple.visible = age >= 0 && age < 0.65;
 
   if (data.ripple.visible) {
     data.ripple.scale.setScalar(1 + age * 5);
-    data.ripple.material.opacity = (1 - age / 0.65) * 0.9;
+
+    data.ripple.material.opacity =
+      (1 - age / 0.65) * 0.9;
   }
 
-  // Fictional scent particles drift out from the host.
+  // Curved fictional scent trail.
   for (let i = 0; i < CONFIG.scentParticles; i++) {
-    const u = (i / CONFIG.scentParticles + time * 0.10) % 1;
+    const u = (
+      i / CONFIG.scentParticles +
+      time * 0.10
+    ) % 1;
+
     const index = i * 3;
     const swirl = u * Math.PI * 3 + data.phase;
 
     data.scentPositions[index] =
-      PATCH_OFFSET.x + Math.sin(swirl) * 0.18 * u;
+      PATCH_OFFSET.x +
+      Math.sin(swirl) * 0.18 * u;
 
     data.scentPositions[index + 1] =
-      PATCH_OFFSET.y + u * 0.28 + Math.cos(swirl) * 0.05;
+      PATCH_OFFSET.y +
+      u * 0.28 +
+      Math.cos(swirl) * 0.05;
 
     data.scentPositions[index + 2] =
       PATCH_OFFSET.z + u * 1.45;
@@ -1049,7 +1223,7 @@ function updateHost(host, time) {
   );
 
   data.scent.material.opacity =
-    recovering ? 0.25 : 0.75 + data.focus * 0.15;
+    recovering ? 0.25 : 0.78 + data.focus * 0.12;
 }
 
 function updateAntennae() {
@@ -1059,7 +1233,8 @@ function updateAntennae() {
   for (const host of hosts) {
     host.userData.patch.getWorldPosition(tempPosition);
 
-    const distance = tempPosition.distanceTo(headPosition);
+    const distance =
+      tempPosition.distanceTo(headPosition);
 
     if (distance < nearestDistance) {
       nearestDistance = distance;
@@ -1090,29 +1265,38 @@ function updateAntennae() {
     rightAntenna.material.opacity = 0.75;
   }
 
-  const focused = hosts.some((host) => host.userData.aimed);
-  const color = focused ? COLOR.orange : COLOR.magenta;
+  const focused = hosts.some(
+    (host) => host.userData.aimed
+  );
+
+  const color = focused
+    ? COLOR.orange
+    : COLOR.magenta;
 
   leftAntenna.material.color.setHex(color);
   rightAntenna.material.color.setHex(color);
 }
 
 // ============================================================
-// WEBXR STARTUP
+// WEBXR SUPPORT AND STARTUP
 // ============================================================
 
 async function checkSupport() {
   if (!window.isSecureContext) {
     startButton.textContent = "HTTPS required";
+
     statusText.textContent =
-      `${CONFIG.version}: open the HTTPS published website.`;
+      `${CONFIG.version}: open your HTTPS website.`;
+
     return;
   }
 
   if (!navigator.xr) {
     startButton.textContent = "Desktop preview";
+
     statusText.textContent =
-      `${CONFIG.version} loaded. Open on Quest to enter AR.`;
+      `${CONFIG.version} loaded. Open on Quest for AR.`;
+
     return;
   }
 
@@ -1122,16 +1306,18 @@ async function checkSupport() {
 
     if (!supported) {
       startButton.textContent = "AR unavailable";
+
       statusText.textContent =
-        `${CONFIG.version} loaded, but immersive-ar is unavailable.`;
+        `${CONFIG.version} loaded; immersive-ar unavailable.`;
+
       return;
     }
 
     startButton.disabled = false;
-    startButton.textContent = "Enter Sensory V6";
+    startButton.textContent = "Enter Sensory V8";
 
     statusText.textContent =
-      `${CONFIG.version} ready: grip places a host; trigger stings.`;
+      "Grip: place host. Aim: acquire. Trigger: sting.";
   } catch (error) {
     statusText.textContent =
       "XR support check failed: " + error.message;
@@ -1166,8 +1352,10 @@ startButton.addEventListener("click", async () => {
 
       panel.style.display = "";
       startButton.disabled = false;
-      startButton.textContent = "Enter Sensory V6";
-      statusText.textContent = `${CONFIG.version}: session ended.`;
+      startButton.textContent = "Enter Sensory V8";
+
+      statusText.textContent =
+        `${CONFIG.version}: session ended.`;
     });
 
     clearHosts();
@@ -1176,11 +1364,6 @@ startButton.addEventListener("click", async () => {
     feedbackUntil = 0;
     proboscisUntil = 0;
     previousTime = null;
-
-    for (const controller of controllers) {
-      controller.userData.aimedHost = null;
-      controller.userData.aimTime = 0;
-    }
 
     await renderer.xr.setSession(session);
 
@@ -1191,7 +1374,7 @@ startButton.addEventListener("click", async () => {
       try {
         await session.end();
       } catch {
-        // Keep the original startup error.
+        // Preserve the original startup error.
       }
     }
 
@@ -1207,7 +1390,7 @@ startButton.addEventListener("click", async () => {
 });
 
 // ============================================================
-// MAIN ANIMATION LOOP
+// MAIN LOOP
 // ============================================================
 
 renderer.setAnimationLoop((milliseconds, frame) => {
@@ -1215,12 +1398,17 @@ renderer.setAnimationLoop((milliseconds, frame) => {
 
   const delta = previousTime === null
     ? 0
-    : Math.max(0, Math.min(now - previousTime, 0.05));
+    : Math.max(
+        0,
+        Math.min(now - previousTime, 0.05)
+      );
 
   previousTime = now;
 
   if (frame) {
-    const referenceSpace = renderer.xr.getReferenceSpace();
+    const referenceSpace =
+      renderer.xr.getReferenceSpace();
+
     const pose = referenceSpace
       ? frame.getViewerPose(referenceSpace)
       : null;
@@ -1229,7 +1417,11 @@ renderer.setAnimationLoop((milliseconds, frame) => {
       const position = pose.transform.position;
       const orientation = pose.transform.orientation;
 
-      headPosition.set(position.x, position.y, position.z);
+      headPosition.set(
+        position.x,
+        position.y,
+        position.z
+      );
 
       headQuaternion.set(
         orientation.x,
@@ -1263,12 +1455,13 @@ renderer.setAnimationLoop((milliseconds, frame) => {
         );
 
         for (const offset of [-0.5, 0.5]) {
-          const position = headPosition.clone()
+          const stingPosition = headPosition.clone()
             .addScaledVector(forward, 1.4)
             .addScaledVector(right, offset);
 
-          position.y -= 0.2;
-          createHost(position);
+          stingPosition.y -= 0.2;
+
+          createHost(stingPosition);
         }
 
         needsInitialHosts = false;
@@ -1289,9 +1482,11 @@ renderer.setAnimationLoop((milliseconds, frame) => {
   scene.updateMatrixWorld(true);
   updateAntennae();
 
-  proboscis.scale.z = now < proboscisUntil ? 1.35 : 1;
+  proboscis.scale.z =
+    now < proboscisUntil ? 1.35 : 1;
 
-  let message = "Grip: place host | Follow the scent trails";
+  let message =
+    "Grip: place host | Follow the scent trails";
 
   if (hosts.some((host) => host.userData.aimed)) {
     message = hosts.some((host) => host.userData.ready)
@@ -1308,18 +1503,23 @@ renderer.setAnimationLoop((milliseconds, frame) => {
 });
 
 // ============================================================
-// RESIZE AND SUPPORT CHECK
+// RESIZE
 // ============================================================
 
 window.addEventListener("resize", () => {
   if (renderer.xr.isPresenting) return;
 
-  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.aspect =
+    window.innerWidth / window.innerHeight;
+
   camera.updateProjectionMatrix();
 
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setSize(
+    window.innerWidth,
+    window.innerHeight
+  );
 });
 
 await checkSupport();
 
-// END OF MOSQUITO SENSORY V6
+// END OF MOSQUITO SENSORY V8
