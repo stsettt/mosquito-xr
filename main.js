@@ -2,29 +2,35 @@ import * as THREE from
   "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js";
 
 // ============================================================
-// MOSQUITO SENSORY V8
-// Purple / magenta environment with orange / yellow hosts.
+// MOSQUITO SENSORY V9 — RANDOM TARGET ROUNDS
 //
-// Passthrough remains visible beneath artistic graphics.
-// This does not process camera pixels or detect real people.
-// Hosts are manually placed and remain stationary.
+// Artistic sensory overlays, not actual thermal imaging.
+// Targets are virtual and do not account for real obstacles.
+// Remain in your safe play area; use controller-ray aiming.
 // ============================================================
 
 const CONFIG = {
-  version: "SENSORY V8",
+  version: "SENSORY V9",
 
-  placementDistance: 1.0,
-  stingDistance: 2.0,
-  acquisitionSeconds: 0.35,
-  cooldownSeconds: 0.9,
-  maximumHosts: 6,
+  minimumTargets: 7,
+  maximumTargets: 20,
 
-  environmentParticles: 180,
-  scentParticles: 40,
+  // Distance from the user's starting position.
+  minimumDistance: 0.9,
+  maximumDistance: 4.0,
 
-  // Reduce this if the room becomes difficult to see.
+  // Patch height relative to the user's head.
+  minimumHeightOffset: -1.0,
+  maximumHeightOffset: 0.9,
+
+  minimumTargetSpacing: 0.55,
+  stingDistance: 6.0,
+  acquisitionSeconds: 0.3,
+  nextRoundDelay: 1.8,
+
+  environmentParticles: 150,
+  scentParticles: 20,
   filterOpacity: 0.85,
-
   showFloorRipples: true
 };
 
@@ -37,8 +43,7 @@ const COLOR = {
 };
 
 // ============================================================
-// PAGE ELEMENTS
-// Uses the IDs from your existing index.html.
+// HTML ELEMENTS
 // ============================================================
 
 const startButton = document.getElementById("start");
@@ -52,12 +57,11 @@ if (!startButton || !statusText || !panel) {
 }
 
 startButton.disabled = true;
-startButton.textContent = "Loading Sensory V8…";
-statusText.textContent = "Preparing mosquito sensory vision.";
+startButton.textContent = "Loading Sensory V9…";
+statusText.textContent = "Preparing random target rounds.";
 
 // ============================================================
-// SCENE
-// Never add an opaque scene.background in this AR experience.
+// SCENE AND RENDERER
 // ============================================================
 
 const scene = new THREE.Scene();
@@ -103,17 +107,22 @@ const rayRotation = new THREE.Matrix4();
 
 const tempPosition = new THREE.Vector3();
 const inverseHeadRotation = new THREE.Quaternion();
-
 const PATCH_OFFSET = new THREE.Vector3(-0.12, 0.22, 0.22);
 
 let activeSession = null;
-let needsInitialHosts = false;
+let needsInitialRound = false;
 let previousTime = null;
 let now = 0;
 
-let stingCount = 0;
-let proboscisUntil = 0;
+let roundNumber = 0;
+let roundTotal = 0;
+let roundCollected = 0;
+let totalStings = 0;
 
+let nextRoundAt = null;
+let lastManualRoundAt = -Infinity;
+
+let proboscisUntil = 0;
 let feedback = "";
 let feedbackUntil = 0;
 let lastHUDKey = "";
@@ -121,6 +130,16 @@ let lastHUDKey = "";
 // ============================================================
 // HELPERS
 // ============================================================
+
+function randomBetween(minimum, maximum) {
+  return minimum + Math.random() * (maximum - minimum);
+}
+
+function randomInteger(minimum, maximum) {
+  return Math.floor(
+    randomBetween(minimum, maximum + 1)
+  );
+}
 
 function transparentMaterial(color, opacity) {
   return new THREE.MeshBasicMaterial({
@@ -141,10 +160,10 @@ function makeCanvasTexture(width, height, draw) {
   const context = canvas.getContext("2d");
 
   if (!context) {
-    throw new Error("Could not create a canvas texture.");
+    throw new Error("Could not create canvas texture.");
   }
 
-  draw(context, canvas);
+  draw(context);
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
@@ -152,9 +171,9 @@ function makeCanvasTexture(width, height, draw) {
   return texture;
 }
 
-function showFeedback(message, seconds = 1.2) {
+function showFeedback(message, duration = 1.2) {
   feedback = message;
-  feedbackUntil = now + seconds;
+  feedbackUntil = now + duration;
 }
 
 const particleTexture = makeCanvasTexture(
@@ -176,16 +195,15 @@ const particleTexture = makeCanvasTexture(
 );
 
 // ============================================================
-// MULTICOLOUR SENSORY FILTER
-// View-attached artistic gradient, not camera processing.
+// PURPLE / MAGENTA / ORANGE / YELLOW FILTER
+// Artistic view-attached overlay, not camera processing.
 // ============================================================
 
 const filterTexture = makeCanvasTexture(
   1024,
   1024,
   (context) => {
-    // Purple base across the view.
-    context.fillStyle = "rgba(85, 5, 145, 0.27)";
+    context.fillStyle = "rgba(85,5,145,0.27)";
     context.fillRect(0, 0, 1024, 1024);
 
     function glow(x, y, radius, red, green, blue, alpha) {
@@ -208,18 +226,13 @@ const filterTexture = makeCanvasTexture(
       context.fillRect(0, 0, 1024, 1024);
     }
 
-    // Broad magenta regions.
     glow(270, 460, 530, 255, 10, 155, 0.38);
     glow(770, 390, 510, 230, 10, 180, 0.34);
-
-    // Purple upper region.
     glow(510, 200, 520, 115, 10, 220, 0.26);
 
-    // Orange lower peripheral regions.
     glow(270, 790, 330, 255, 100, 0, 0.32);
     glow(770, 790, 330, 255, 125, 0, 0.32);
 
-    // Smaller yellow highlights.
     glow(300, 900, 210, 255, 230, 35, 0.24);
     glow(730, 900, 210, 255, 230, 35, 0.24);
   }
@@ -239,34 +252,18 @@ const visor = new THREE.Mesh(
 );
 
 visor.position.z = -1.05;
-
-// Draw before the virtual hosts so their warm colours stay clear.
 visor.renderOrder = -100;
 visor.frustumCulled = false;
-
 camera.add(visor);
 
 // ============================================================
-// COMPOUND-EYE PATTERN
-// A stylised hexagonal frame, not optical image duplication.
+// COMPOUND-EYE OVERLAY
 // ============================================================
 
 const eyeTexture = makeCanvasTexture(
   1024,
   1024,
   (context) => {
-    const gradient = context.createRadialGradient(
-      512, 512, 160,
-      512, 512, 710
-    );
-
-    gradient.addColorStop(0, "rgba(50,5,90,0)");
-    gradient.addColorStop(0.6, "rgba(75,10,110,0.04)");
-    gradient.addColorStop(1, "rgba(90,5,130,0.20)");
-
-    context.fillStyle = gradient;
-    context.fillRect(0, 0, 1024, 1024);
-
     const radius = 43;
     const height = Math.sqrt(3) * radius;
 
@@ -281,8 +278,8 @@ const eyeTexture = makeCanvasTexture(
           (Math.abs(column % 2) === 1 ? height / 2 : 0);
 
         const distance = Math.hypot(x - 512, y - 512);
-        const edge = Math.min(1, distance / 600);
-        const alpha = 0.025 + edge * 0.21;
+        const alpha =
+          0.025 + Math.min(1, distance / 600) * 0.21;
 
         context.strokeStyle =
           `rgba(255,115,220,${alpha})`;
@@ -322,7 +319,6 @@ const compoundEye = new THREE.Mesh(
 compoundEye.position.z = -1.02;
 compoundEye.renderOrder = 100;
 compoundEye.frustumCulled = false;
-
 camera.add(compoundEye);
 
 // ============================================================
@@ -380,24 +376,24 @@ const proboscis = makeHeadLine(
 );
 
 // ============================================================
-// HEADSET HUD
+// HUD
 // ============================================================
 
 const hudCanvas = document.createElement("canvas");
 hudCanvas.width = 1024;
-hudCanvas.height = 256;
+hudCanvas.height = 300;
 
 const hudContext = hudCanvas.getContext("2d");
 
 if (!hudContext) {
-  throw new Error("Could not create the headset HUD.");
+  throw new Error("Could not create HUD.");
 }
 
 const hudTexture = new THREE.CanvasTexture(hudCanvas);
 hudTexture.colorSpace = THREE.SRGBColorSpace;
 
 const hud = new THREE.Mesh(
-  new THREE.PlaneGeometry(0.88, 0.22),
+  new THREE.PlaneGeometry(0.9, 0.264),
   new THREE.MeshBasicMaterial({
     map: hudTexture,
     transparent: true,
@@ -407,60 +403,77 @@ const hud = new THREE.Mesh(
   })
 );
 
-hud.position.set(0, -0.30, -1);
+hud.position.set(0, -0.32, -1);
 hud.renderOrder = 120;
 hud.frustumCulled = false;
 camera.add(hud);
 
 function updateHUD(message) {
-  const key = `${stingCount}|${message}`;
+  const key = [
+    roundNumber,
+    roundTotal,
+    roundCollected,
+    totalStings,
+    message
+  ].join("|");
 
   if (key === lastHUDKey) return;
   lastHUDKey = key;
 
-  hudContext.clearRect(0, 0, 1024, 256);
+  hudContext.clearRect(0, 0, 1024, 300);
 
-  hudContext.fillStyle = "rgba(40,4,65,0.80)";
-  hudContext.fillRect(0, 0, 1024, 256);
+  hudContext.fillStyle = "rgba(40,4,65,0.82)";
+  hudContext.fillRect(0, 0, 1024, 300);
 
   hudContext.textAlign = "center";
+
+  hudContext.fillStyle = "#FFD6F2";
+  hudContext.font = "25px sans-serif";
+  hudContext.fillText(CONFIG.version, 512, 40);
+
   hudContext.fillStyle = "#FFEB70";
-  hudContext.font = "bold 50px sans-serif";
+  hudContext.font = "bold 44px sans-serif";
 
   hudContext.fillText(
-    `${CONFIG.version} · STINGS: ${stingCount}`,
+    `ROUND ${roundNumber} · ${roundCollected}/${roundTotal}`,
     512,
-    85
+    98
   );
 
   hudContext.fillStyle = "#FFD6F2";
-  hudContext.font = "29px sans-serif";
-  hudContext.fillText(message, 512, 145);
+  hudContext.font = "27px sans-serif";
+  hudContext.fillText(message, 512, 153);
 
-  const fill = stingCount === 0
-    ? 0
-    : (((stingCount - 1) % 10) + 1) / 10;
-
-  hudContext.fillStyle = "#66205F";
-  hudContext.fillRect(212, 190, 600, 16);
-
-  const barGradient = hudContext.createLinearGradient(
-    212, 0, 812, 0
+  hudContext.font = "23px sans-serif";
+  hudContext.fillText(
+    `Total stings: ${totalStings} · Grip: new random round`,
+    512,
+    199
   );
 
-  barGradient.addColorStop(0, "#FF1493");
-  barGradient.addColorStop(0.5, "#FF8500");
-  barGradient.addColorStop(1, "#FFEB70");
+  const progress = roundTotal > 0
+    ? roundCollected / roundTotal
+    : 0;
 
-  hudContext.fillStyle = barGradient;
-  hudContext.fillRect(212, 190, 600 * fill, 16);
+  hudContext.fillStyle = "#66205F";
+  hudContext.fillRect(160, 243, 704, 17);
+
+  const gradient = hudContext.createLinearGradient(
+    160, 0, 864, 0
+  );
+
+  gradient.addColorStop(0, "#FF1493");
+  gradient.addColorStop(0.5, "#FF8500");
+  gradient.addColorStop(1, "#FFEB70");
+
+  hudContext.fillStyle = gradient;
+  hudContext.fillRect(160, 243, 704 * progress, 17);
 
   hudTexture.needsUpdate = true;
 }
 
 // ============================================================
-// ENVIRONMENTAL SENSORY PARTICLES
-// Fictional spatial atmosphere, not room reconstruction.
+// ENVIRONMENTAL PARTICLES AND FLOOR RIPPLE GRAPHICS
 // ============================================================
 
 const environment = new THREE.Group();
@@ -484,18 +497,15 @@ const particlePalette = [
 
 for (let i = 0; i < CONFIG.environmentParticles; i++) {
   environmentSeeds.push({
-    x: (Math.random() - 0.5) * 7,
-    y: 0.15 + Math.random() * 2.7,
-    z: (Math.random() - 0.5) * 7,
-    phase: Math.random() * Math.PI * 2
+    x: randomBetween(-5, 5),
+    y: randomBetween(0.15, 3),
+    z: randomBetween(-5, 5),
+    phase: randomBetween(0, Math.PI * 2)
   });
 
-  // Mostly purple/magenta, with occasional orange particles.
-  const chosen = particlePalette[
+  particlePalette[
     i % 10 === 0 ? 2 : i % 2
-  ];
-
-  chosen.toArray(environmentColors, i * 3);
+  ].toArray(environmentColors, i * 3);
 }
 
 const environmentGeometry = new THREE.BufferGeometry();
@@ -516,7 +526,7 @@ const environmentPoints = new THREE.Points(
     vertexColors: true,
     map: particleTexture,
     size: 0.045,
-    opacity: 0.50,
+    opacity: 0.5,
     transparent: true,
     depthWrite: false,
     sizeAttenuation: true,
@@ -532,10 +542,10 @@ const floorRipples = [];
 if (CONFIG.showFloorRipples) {
   for (let i = 0; i < 3; i++) {
     const ring = new THREE.Mesh(
-      new THREE.RingGeometry(0.98, 1, 64),
+      new THREE.RingGeometry(0.98, 1, 48),
       transparentMaterial(
         i === 1 ? COLOR.magenta : COLOR.violet,
-        0.10
+        0.1
       )
     );
 
@@ -548,8 +558,7 @@ if (CONFIG.showFloorRipples) {
 }
 
 // ============================================================
-// HOT SIGNATURE MATERIAL
-// Applies false colours to virtual host meshes only.
+// HOT SIGNATURE SHADER
 // ============================================================
 
 function makeHeatMaterial() {
@@ -624,9 +633,7 @@ function makeHeatMaterial() {
         color = mix(color, yellow, uFlash * 0.8);
 
         float alpha =
-          0.25 +
-          heat * 0.23 +
-          uFocus * 0.08;
+          0.25 + heat * 0.23 + uFocus * 0.08;
 
         gl_FragColor = vec4(color, alpha);
 
@@ -642,7 +649,7 @@ function makeHeatMaterial() {
 }
 
 // ============================================================
-// HOST SIGNATURE CREATION AND CLEANUP
+// HOST CREATION AND CLEANUP
 // ============================================================
 
 function disposeHost(host) {
@@ -668,36 +675,29 @@ function disposeHost(host) {
   geometries.forEach((geometry) => geometry.dispose());
   materials.forEach((material) => material.dispose());
 
-  // particleTexture is shared and must not be disposed here.
+  // Shared particleTexture is intentionally retained.
 }
 
-function clearHosts() {
+function resetControllerAim() {
   for (const controller of controllers) {
     controller.userData.aimedHost = null;
     controller.userData.aimTime = 0;
-  }
 
+    if (controller.userData.aimDot) {
+      controller.userData.aimDot.visible = false;
+    }
+  }
+}
+
+function clearHosts() {
+  resetControllerAim();
   hosts.forEach(disposeHost);
   hosts.length = 0;
 }
 
 function createHost(stingPosition) {
-  if (hosts.length >= CONFIG.maximumHosts) {
-    const oldest = hosts.shift();
-
-    for (const controller of controllers) {
-      if (controller.userData.aimedHost === oldest) {
-        controller.userData.aimedHost = null;
-        controller.userData.aimTime = 0;
-      }
-    }
-
-    disposeHost(oldest);
-  }
-
   const host = new THREE.Group();
 
-  // Face the user at placement time.
   host.rotation.y = Math.atan2(
     headPosition.x - stingPosition.x,
     headPosition.z - stingPosition.z
@@ -710,18 +710,16 @@ function createHost(stingPosition) {
 
   const heatMaterial = makeHeatMaterial();
 
-  // Torso.
   const torso = new THREE.Mesh(
-    new THREE.CapsuleGeometry(0.23, 0.48, 5, 20),
+    new THREE.CapsuleGeometry(0.23, 0.48, 4, 12),
     heatMaterial
   );
 
   torso.scale.z = 0.65;
   host.add(torso);
 
-  // Head.
   const head = new THREE.Mesh(
-    new THREE.SphereGeometry(0.14, 20, 14),
+    new THREE.SphereGeometry(0.14, 12, 10),
     heatMaterial
   );
 
@@ -729,9 +727,8 @@ function createHost(stingPosition) {
   head.scale.set(0.88, 1.05, 0.85);
   host.add(head);
 
-  // Shoulders.
   const shoulders = new THREE.Mesh(
-    new THREE.SphereGeometry(1, 20, 12),
+    new THREE.SphereGeometry(1, 12, 8),
     heatMaterial
   );
 
@@ -739,23 +736,20 @@ function createHost(stingPosition) {
   shoulders.scale.set(0.32, 0.10, 0.15);
   host.add(shoulders);
 
-  // Arms.
   for (const side of [-1, 1]) {
     const arm = new THREE.Mesh(
-      new THREE.CapsuleGeometry(0.06, 0.35, 4, 12),
+      new THREE.CapsuleGeometry(0.06, 0.35, 3, 8),
       heatMaterial
     );
 
     arm.position.set(side * 0.29, 0.015, 0);
     arm.rotation.z = side * 0.15;
     arm.scale.z = 0.8;
-
     host.add(arm);
   }
 
-  // Warm inner torso.
   const innerTorso = new THREE.Mesh(
-    new THREE.CapsuleGeometry(0.10, 0.23, 4, 16),
+    new THREE.CapsuleGeometry(0.10, 0.23, 3, 10),
     transparentMaterial(COLOR.yellow, 0.15)
   );
 
@@ -763,9 +757,9 @@ function createHost(stingPosition) {
   innerTorso.scale.z = 0.5;
   host.add(innerTorso);
 
-  // Interactive sting patch.
+  // Slightly larger patch for distant target aiming.
   const patch = new THREE.Mesh(
-    new THREE.CircleGeometry(0.10, 32),
+    new THREE.CircleGeometry(0.12, 24),
     transparentMaterial(COLOR.magenta, 0.88)
   );
 
@@ -775,7 +769,7 @@ function createHost(stingPosition) {
   host.add(patch);
 
   const warmPatch = new THREE.Mesh(
-    new THREE.CircleGeometry(0.070, 32),
+    new THREE.CircleGeometry(0.085, 24),
     transparentMaterial(COLOR.orange, 0.98)
   );
 
@@ -783,16 +777,14 @@ function createHost(stingPosition) {
   patch.add(warmPatch);
 
   const core = new THREE.Mesh(
-    new THREE.CircleGeometry(0.030, 24),
-    transparentMaterial(COLOR.yellow, 0.50)
+    new THREE.CircleGeometry(0.035, 20),
+    transparentMaterial(COLOR.yellow, 0.5)
   );
 
   core.position.z = 0.006;
   patch.add(core);
 
-  // Three acquisition-ring segments.
   const segments = new THREE.Group();
-
   segments.position.copy(PATCH_OFFSET);
   segments.position.z += 0.015;
   host.add(segments);
@@ -800,9 +792,9 @@ function createHost(stingPosition) {
   for (let i = 0; i < 3; i++) {
     const segment = new THREE.Mesh(
       new THREE.RingGeometry(
-        0.125,
-        0.136,
-        24,
+        0.145,
+        0.158,
+        16,
         1,
         i * Math.PI * 2 / 3,
         Math.PI * 0.48
@@ -813,9 +805,8 @@ function createHost(stingPosition) {
     segments.add(segment);
   }
 
-  // Closed yellow ring means ready to sting.
   const closedRing = new THREE.Mesh(
-    new THREE.RingGeometry(0.125, 0.138, 48),
+    new THREE.RingGeometry(0.145, 0.16, 32),
     transparentMaterial(COLOR.yellow, 0.98)
   );
 
@@ -823,9 +814,8 @@ function createHost(stingPosition) {
   closedRing.visible = false;
   host.add(closedRing);
 
-  // Expanding sting ripple.
   const ripple = new THREE.Mesh(
-    new THREE.RingGeometry(0.10, 0.112, 48),
+    new THREE.RingGeometry(0.12, 0.135, 32),
     transparentMaterial(COLOR.orange, 0)
   );
 
@@ -834,7 +824,6 @@ function createHost(stingPosition) {
   ripple.visible = false;
   host.add(ripple);
 
-  // Scent particles.
   const scentPositions = new Float32Array(
     CONFIG.scentParticles * 3
   );
@@ -876,8 +865,9 @@ function createHost(stingPosition) {
     focus: 0,
     aimed: false,
     ready: false,
-    lastStung: -Infinity,
-    phase: Math.random() * Math.PI * 2
+    collected: false,
+    collectedAt: -Infinity,
+    phase: randomBetween(0, Math.PI * 2)
   };
 
   scene.add(host);
@@ -886,12 +876,94 @@ function createHost(stingPosition) {
   return host;
 }
 
-// Desktop preview signatures.
-createHost(new THREE.Vector3(-0.45, 1.4, -1.4));
-createHost(new THREE.Vector3(0.45, 1.4, -1.4));
+// ============================================================
+// RANDOM ROUND GENERATION
+// ============================================================
+
+function generateRandomPositions(count) {
+  const positions = [];
+
+  for (let i = 0; i < count; i++) {
+    let candidate = null;
+
+    // Try to avoid patches being very close together.
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const angle = randomBetween(0, Math.PI * 2);
+
+      const distance = randomBetween(
+        CONFIG.minimumDistance,
+        CONFIG.maximumDistance
+      );
+
+      const height = Math.max(
+        0.65,
+        headPosition.y + randomBetween(
+          CONFIG.minimumHeightOffset,
+          CONFIG.maximumHeightOffset
+        )
+      );
+
+      candidate = new THREE.Vector3(
+        headPosition.x + Math.sin(angle) * distance,
+        height,
+        headPosition.z - Math.cos(angle) * distance
+      );
+
+      const wellSpaced = positions.every((position) => {
+        return position.distanceTo(candidate) >=
+          CONFIG.minimumTargetSpacing;
+      });
+
+      if (wellSpaced) break;
+    }
+
+    // Count is always preserved, even if spacing attempts fail.
+    positions.push(candidate);
+  }
+
+  return positions;
+}
+
+function startNewRound() {
+  clearHosts();
+
+  roundNumber += 1;
+  roundCollected = 0;
+  nextRoundAt = null;
+
+  roundTotal = randomInteger(
+    CONFIG.minimumTargets,
+    CONFIG.maximumTargets
+  );
+
+  environment.position.set(
+    headPosition.x,
+    0,
+    headPosition.z
+  );
+
+  const positions = generateRandomPositions(roundTotal);
+
+  positions.forEach(createHost);
+
+  showFeedback(
+    `Round ${roundNumber}: find ${roundTotal} targets around you!`,
+    2.2
+  );
+}
+
+function requestManualRound() {
+  if (!renderer.xr.isPresenting || needsInitialRound) return;
+
+  // Prevent two grip presses from immediately making two rounds.
+  if (now - lastManualRoundAt < 0.75) return;
+
+  lastManualRoundAt = now;
+  startNewRound();
+}
 
 // ============================================================
-// CONTROLLER INTERACTION
+// CONTROLLER RAYS
 // ============================================================
 
 function setControllerRay(controller) {
@@ -920,74 +992,64 @@ function getControllerHit(controller) {
 
   setControllerRay(controller);
 
-  const patches = hosts.map((host) => host.userData.patch);
+  const patches = hosts
+    .filter((host) => !host.userData.collected)
+    .map((host) => host.userData.patch);
+
   const hits = raycaster.intersectObjects(patches, false);
 
   return hits.length ? hits[0] : null;
 }
 
-function placeHost(controller) {
-  if (
-    !renderer.xr.isPresenting ||
-    !controller.visible
-  ) {
+function sting(controller) {
+  if (!renderer.xr.isPresenting || nextRoundAt !== null) {
     return;
   }
-
-  setControllerRay(controller);
-
-  const position = rayOrigin.clone().addScaledVector(
-    rayDirection,
-    CONFIG.placementDistance
-  );
-
-  createHost(position);
-
-  showFeedback("Host placed — aim at the orange patch.");
-}
-
-function sting(controller) {
-  if (!renderer.xr.isPresenting) return;
 
   const hit = getControllerHit(controller);
 
   if (!hit) {
-    showFeedback("Aim at a small orange sting patch.");
+    showFeedback("Aim at an orange sting patch.");
     return;
   }
 
   const host = hit.object.userData.host;
   const data = host.userData;
 
-  if (now - data.lastStung < CONFIG.cooldownSeconds) {
-    showFeedback("Recovering…", 0.5);
-    return;
-  }
+  if (data.collected) return;
 
   if (
     controller.userData.aimedHost !== host ||
     controller.userData.aimTime < CONFIG.acquisitionSeconds
   ) {
-    showFeedback("Hold your aim until the ring closes.");
+    showFeedback("Hold aim until the yellow ring closes.");
     return;
   }
 
-  data.lastStung = now;
+  data.collected = true;
+  data.collectedAt = now;
   data.focus = 0;
   data.ready = false;
 
-  for (const other of controllers) {
-    if (other.userData.aimedHost === host) {
-      other.userData.aimTime = 0;
-    }
-  }
-
-  stingCount += 1;
+  roundCollected += 1;
+  totalStings += 1;
   proboscisUntil = now + 0.2;
 
-  showFeedback("Sting collected!");
+  resetControllerAim();
 
-  // Optional vibration.
+  const remaining = roundTotal - roundCollected;
+
+  if (remaining === 0) {
+    nextRoundAt = now + CONFIG.nextRoundDelay;
+
+    showFeedback(
+      "Round complete! Preparing new targets…",
+      CONFIG.nextRoundDelay
+    );
+  } else {
+    showFeedback(`Collected! ${remaining} targets remaining.`);
+  }
+
   const actuator =
     controller.userData.inputSource
       ?.gamepad?.hapticActuators?.[0];
@@ -998,7 +1060,7 @@ function sting(controller) {
         actuator.pulse(0.45, 90)
       ).catch(() => {});
     } catch {
-      // Vibration failure must not interrupt the experience.
+      // Haptics are optional.
     }
   }
 }
@@ -1010,44 +1072,8 @@ for (let i = 0; i < 2; i++) {
   controller.userData.aimedHost = null;
   controller.userData.aimTime = 0;
 
-  controller.addEventListener("connected", (event) => {
-    controller.userData.inputSource = event.data;
-  });
-
-  controller.addEventListener("disconnected", () => {
-    controller.userData.inputSource = null;
-    controller.userData.aimedHost = null;
-    controller.userData.aimTime = 0;
-    controller.userData.aimDot.visible = false;
-  });
-
-  controller.addEventListener("selectstart", () => {
-    sting(controller);
-  });
-
-  controller.addEventListener("squeezestart", () => {
-    placeHost(controller);
-  });
-
-  // Short pointing line.
-  const pointer = new THREE.Line(
-    new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(0, 0, 0),
-      new THREE.Vector3(0, 0, -0.18)
-    ]),
-    new THREE.LineBasicMaterial({
-      color: COLOR.yellow,
-      transparent: true,
-      opacity: 0.8,
-      toneMapped: false
-    })
-  );
-
-  controller.add(pointer);
-
-  // A small dot appears on a patch when aimed at.
   const aimDot = new THREE.Mesh(
-    new THREE.SphereGeometry(0.008, 10, 8),
+    new THREE.SphereGeometry(0.01, 8, 6),
     new THREE.MeshBasicMaterial({
       color: COLOR.yellow,
       depthTest: false,
@@ -1061,12 +1087,45 @@ for (let i = 0; i < 2; i++) {
 
   controller.userData.aimDot = aimDot;
 
+  controller.addEventListener("connected", (event) => {
+    controller.userData.inputSource = event.data;
+  });
+
+  controller.addEventListener("disconnected", () => {
+    controller.userData.inputSource = null;
+    controller.userData.aimedHost = null;
+    controller.userData.aimTime = 0;
+    aimDot.visible = false;
+  });
+
+  controller.addEventListener("selectstart", () => {
+    sting(controller);
+  });
+
+  controller.addEventListener("squeezestart", () => {
+    requestManualRound();
+  });
+
+  const pointer = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(0, 0, -0.25)
+    ]),
+    new THREE.LineBasicMaterial({
+      color: COLOR.yellow,
+      transparent: true,
+      opacity: 0.8,
+      toneMapped: false
+    })
+  );
+
+  controller.add(pointer);
   scene.add(controller);
   controllers.push(controller);
 }
 
 // ============================================================
-// ANIMATION HELPERS
+// ANIMATION
 // ============================================================
 
 function updateEnvironment(time) {
@@ -1088,7 +1147,7 @@ function updateEnvironment(time) {
   floorRipples.forEach((ring, i) => {
     const cycle = (time * 0.09 + i / 3) % 1;
 
-    ring.scale.setScalar(0.4 + cycle * 3.6);
+    ring.scale.setScalar(0.4 + cycle * 4.5);
     ring.material.opacity = (1 - cycle) * 0.11;
   });
 }
@@ -1110,9 +1169,7 @@ function updateAiming(delta) {
 
     dot.visible = Boolean(hit);
 
-    if (hit) {
-      dot.position.copy(hit.point);
-    }
+    if (hit) dot.position.copy(hit.point);
 
     if (controller.userData.aimedHost !== host) {
       controller.userData.aimedHost = host;
@@ -1124,44 +1181,61 @@ function updateAiming(delta) {
       continue;
     }
 
+    controller.userData.aimTime += delta;
+
     const data = host.userData;
 
-    const recovering =
-      now - data.lastStung < CONFIG.cooldownSeconds;
+    data.aimed = true;
 
-    if (recovering) {
-      controller.userData.aimTime = 0;
-    } else {
-      controller.userData.aimTime += delta;
-    }
-
-    const focus = Math.min(
-      1,
-      controller.userData.aimTime /
-        CONFIG.acquisitionSeconds
+    data.focus = Math.max(
+      data.focus,
+      Math.min(
+        1,
+        controller.userData.aimTime /
+          CONFIG.acquisitionSeconds
+      )
     );
 
-    data.aimed = true;
-    data.focus = Math.max(data.focus, focus);
-    data.ready = !recovering && data.focus >= 1;
+    data.ready = data.focus >= 1;
   }
 }
 
 function updateHost(host, time) {
   const data = host.userData;
-  const age = time - data.lastStung;
 
-  const recovering = age < CONFIG.cooldownSeconds;
-  const flash = Math.max(0, 1 - age / 0.45);
+  if (data.collected) {
+    const age = time - data.collectedAt;
+
+    data.heatMaterial.uniforms.uFlash.value =
+      Math.max(0, 1 - age / 0.45);
+
+    data.heatMaterial.uniforms.uTime.value = time;
+
+    data.segments.visible = false;
+    data.closedRing.visible = false;
+    data.scent.visible = false;
+
+    data.ripple.visible = age < 0.65;
+
+    if (data.ripple.visible) {
+      data.ripple.scale.setScalar(1 + age * 5);
+
+      data.ripple.material.opacity =
+        (1 - age / 0.65) * 0.9;
+    }
+
+    if (age >= 0.65) {
+      host.visible = false;
+    }
+
+    return;
+  }
 
   data.heatMaterial.uniforms.uTime.value =
     time + data.phase;
 
   data.heatMaterial.uniforms.uFocus.value = data.focus;
-  data.heatMaterial.uniforms.uFlash.value = flash;
-
-  data.patch.material.opacity =
-    recovering ? 0.35 : 0.88;
+  data.heatMaterial.uniforms.uFlash.value = 0;
 
   data.core.material.opacity =
     0.45 + data.focus * 0.55;
@@ -1170,50 +1244,30 @@ function updateHost(host, time) {
   data.closedRing.visible = data.ready;
 
   data.segments.rotation.z = time * 0.4;
-
-  data.segments.scale.setScalar(
-    1.3 - data.focus * 0.3
-  );
+  data.segments.scale.setScalar(1.3 - data.focus * 0.3);
 
   for (const segment of data.segments.children) {
     segment.material.color.setHex(
       data.aimed ? COLOR.orange : COLOR.magenta
     );
-
-    segment.material.opacity =
-      recovering ? 0.2 : 0.8;
   }
 
-  data.ripple.visible = age >= 0 && age < 0.65;
-
-  if (data.ripple.visible) {
-    data.ripple.scale.setScalar(1 + age * 5);
-
-    data.ripple.material.opacity =
-      (1 - age / 0.65) * 0.9;
-  }
-
-  // Curved fictional scent trail.
   for (let i = 0; i < CONFIG.scentParticles; i++) {
     const u = (
-      i / CONFIG.scentParticles +
-      time * 0.10
+      i / CONFIG.scentParticles + time * 0.10
     ) % 1;
 
     const index = i * 3;
     const swirl = u * Math.PI * 3 + data.phase;
 
     data.scentPositions[index] =
-      PATCH_OFFSET.x +
-      Math.sin(swirl) * 0.18 * u;
+      PATCH_OFFSET.x + Math.sin(swirl) * 0.18 * u;
 
     data.scentPositions[index + 1] =
-      PATCH_OFFSET.y +
-      u * 0.28 +
-      Math.cos(swirl) * 0.05;
+      PATCH_OFFSET.y + u * 0.28 + Math.cos(swirl) * 0.05;
 
     data.scentPositions[index + 2] =
-      PATCH_OFFSET.z + u * 1.45;
+      PATCH_OFFSET.z + u * 1.1;
   }
 
   data.scent.geometry.attributes.position.needsUpdate = true;
@@ -1223,7 +1277,7 @@ function updateHost(host, time) {
   );
 
   data.scent.material.opacity =
-    recovering ? 0.25 : 0.78 + data.focus * 0.12;
+    0.78 + data.focus * 0.12;
 }
 
 function updateAntennae() {
@@ -1231,6 +1285,8 @@ function updateAntennae() {
   let nearestDistance = Infinity;
 
   for (const host of hosts) {
+    if (host.userData.collected) continue;
+
     host.userData.patch.getWorldPosition(tempPosition);
 
     const distance =
@@ -1269,34 +1325,90 @@ function updateAntennae() {
     (host) => host.userData.aimed
   );
 
-  const color = focused
-    ? COLOR.orange
-    : COLOR.magenta;
+  const color = focused ? COLOR.orange : COLOR.magenta;
 
   leftAntenna.material.color.setHex(color);
   rightAntenna.material.color.setHex(color);
 }
 
+function getGuidanceMessage() {
+  if (nextRoundAt !== null) {
+    return "Round complete — new targets incoming!";
+  }
+
+  if (hosts.some((host) => host.userData.ready)) {
+    return "Target acquired — press trigger";
+  }
+
+  if (hosts.some((host) => host.userData.aimed)) {
+    return "Hold aim — acquiring target";
+  }
+
+  let nearest = null;
+  let nearestDistance = Infinity;
+
+  for (const host of hosts) {
+    if (host.userData.collected) continue;
+
+    host.userData.patch.getWorldPosition(tempPosition);
+
+    const distance = tempPosition.distanceTo(headPosition);
+
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearest = host;
+    }
+  }
+
+  if (!nearest) return "Find the warm signatures";
+
+  nearest.userData.patch.getWorldPosition(tempPosition);
+
+  inverseHeadRotation.copy(headQuaternion).invert();
+
+  tempPosition
+    .sub(headPosition)
+    .applyQuaternion(inverseHeadRotation)
+    .normalize();
+
+  if (tempPosition.z > 0.15) {
+    return "A target is behind you — turn carefully";
+  }
+
+  if (tempPosition.y > 0.35) {
+    return "Look up — a target is above";
+  }
+
+  if (tempPosition.y < -0.35) {
+    return "Look down — a target is below";
+  }
+
+  if (tempPosition.x < -0.3) {
+    return "Look left — follow the scent trail";
+  }
+
+  if (tempPosition.x > 0.3) {
+    return "Look right — follow the scent trail";
+  }
+
+  return "Aim at the orange patch";
+}
+
 // ============================================================
-// WEBXR SUPPORT AND STARTUP
+// WEBXR STARTUP
 // ============================================================
 
 async function checkSupport() {
   if (!window.isSecureContext) {
     startButton.textContent = "HTTPS required";
-
-    statusText.textContent =
-      `${CONFIG.version}: open your HTTPS website.`;
-
+    statusText.textContent = "Open your published HTTPS website.";
     return;
   }
 
   if (!navigator.xr) {
     startButton.textContent = "Desktop preview";
-
     statusText.textContent =
-      `${CONFIG.version} loaded. Open on Quest for AR.`;
-
+      "Sensory V9 loaded. Open on Quest for AR.";
     return;
   }
 
@@ -1306,18 +1418,16 @@ async function checkSupport() {
 
     if (!supported) {
       startButton.textContent = "AR unavailable";
-
       statusText.textContent =
-        `${CONFIG.version} loaded; immersive-ar unavailable.`;
-
+        "Sensory V9 loaded; immersive-ar unavailable.";
       return;
     }
 
     startButton.disabled = false;
-    startButton.textContent = "Enter Sensory V8";
+    startButton.textContent = "Enter Sensory V9";
 
     statusText.textContent =
-      "Grip: place host. Aim: acquire. Trigger: sting.";
+      "Random rounds: 7–20 targets. Trigger: sting. Grip: new round.";
   } catch (error) {
     statusText.textContent =
       "XR support check failed: " + error.message;
@@ -1342,32 +1452,33 @@ startButton.addEventListener("click", async () => {
 
     session.addEventListener("end", () => {
       activeSession = null;
-      needsInitialHosts = false;
+      needsInitialRound = false;
+      nextRoundAt = null;
 
-      for (const controller of controllers) {
-        controller.userData.aimedHost = null;
-        controller.userData.aimTime = 0;
-        controller.userData.aimDot.visible = false;
-      }
+      resetControllerAim();
 
       panel.style.display = "";
       startButton.disabled = false;
-      startButton.textContent = "Enter Sensory V8";
-
-      statusText.textContent =
-        `${CONFIG.version}: session ended.`;
+      startButton.textContent = "Enter Sensory V9";
+      statusText.textContent = "Sensory V9: session ended.";
     });
 
     clearHosts();
 
-    stingCount = 0;
+    roundNumber = 0;
+    roundTotal = 0;
+    roundCollected = 0;
+    totalStings = 0;
+
+    nextRoundAt = null;
+    lastManualRoundAt = -Infinity;
     feedbackUntil = 0;
     proboscisUntil = 0;
     previousTime = null;
 
     await renderer.xr.setSession(session);
 
-    needsInitialHosts = true;
+    needsInitialRound = true;
     panel.style.display = "none";
   } catch (error) {
     if (session) {
@@ -1389,6 +1500,9 @@ startButton.addEventListener("click", async () => {
   }
 });
 
+// Desktop visual preview of one random round.
+startNewRound();
+
 // ============================================================
 // MAIN LOOP
 // ============================================================
@@ -1398,16 +1512,12 @@ renderer.setAnimationLoop((milliseconds, frame) => {
 
   const delta = previousTime === null
     ? 0
-    : Math.max(
-        0,
-        Math.min(now - previousTime, 0.05)
-      );
+    : Math.max(0, Math.min(now - previousTime, 0.05));
 
   previousTime = now;
 
   if (frame) {
-    const referenceSpace =
-      renderer.xr.getReferenceSpace();
+    const referenceSpace = renderer.xr.getReferenceSpace();
 
     const pose = referenceSpace
       ? frame.getViewerPose(referenceSpace)
@@ -1430,41 +1540,16 @@ renderer.setAnimationLoop((milliseconds, frame) => {
         orientation.w
       );
 
-      if (needsInitialHosts) {
-        environment.position.set(
-          headPosition.x,
-          0,
-          headPosition.z
-        );
+      if (needsInitialRound) {
+        startNewRound();
+        needsInitialRound = false;
+      }
 
-        const forward = new THREE.Vector3(0, 0, -1)
-          .applyQuaternion(headQuaternion);
-
-        forward.y = 0;
-
-        if (forward.lengthSq() < 0.001) {
-          forward.set(0, 0, -1);
-        }
-
-        forward.normalize();
-
-        const right = new THREE.Vector3(
-          -forward.z,
-          0,
-          forward.x
-        );
-
-        for (const offset of [-0.5, 0.5]) {
-          const stingPosition = headPosition.clone()
-            .addScaledVector(forward, 1.4)
-            .addScaledVector(right, offset);
-
-          stingPosition.y -= 0.2;
-
-          createHost(stingPosition);
-        }
-
-        needsInitialHosts = false;
+      if (
+        nextRoundAt !== null &&
+        now >= nextRoundAt
+      ) {
+        startNewRound();
       }
     }
   } else {
@@ -1485,25 +1570,16 @@ renderer.setAnimationLoop((milliseconds, frame) => {
   proboscis.scale.z =
     now < proboscisUntil ? 1.35 : 1;
 
-  let message =
-    "Grip: place host | Follow the scent trails";
-
-  if (hosts.some((host) => host.userData.aimed)) {
-    message = hosts.some((host) => host.userData.ready)
-      ? "Host acquired — press trigger"
-      : "Hold your aim — acquiring host";
-  }
-
-  if (now < feedbackUntil) {
-    message = feedback;
-  }
+  const message = now < feedbackUntil
+    ? feedback
+    : getGuidanceMessage();
 
   updateHUD(message);
   renderer.render(scene, camera);
 });
 
 // ============================================================
-// RESIZE
+// RESIZE AND SUPPORT CHECK
 // ============================================================
 
 window.addEventListener("resize", () => {
@@ -1522,4 +1598,4 @@ window.addEventListener("resize", () => {
 
 await checkSupport();
 
-// END OF MOSQUITO SENSORY V8
+// END OF MOSQUITO SENSORY V9
