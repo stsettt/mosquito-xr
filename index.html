@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1"
+  />
+  <title>Mosquito XR</title>
+
+  <style>
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      background: #17100d;
+      color: #fff4df;
+      font-family: system-ui, sans-serif;
+    }
+
+    canvas {
+      display: block;
+    }
+
+    #panel {
+      position: fixed;
+      z-index: 10;
+      top: 20px;
+      left: 20px;
+      right: 20px;
+      max-width: 480px;
+      padding: 20px;
+      background: rgba(20, 10, 5, 0.9);
+      border: 1px solid #ff9b38;
+      border-radius: 14px;
+    }
+
+    h1 {
+      margin-top: 0;
+    }
+
+    button {
+      padding: 12px 18px;
+      border: 0;
+      border-radius: 8px;
+      background: #ffad36;
+      color: #201000;
+      font-size: 16px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+
+    #status {
+      line-height: 1.5;
+    }
+
+    .note {
+      font-size: 14px;
+      opacity: 0.8;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="panel">
+    <h1>Mosquito XR</h1>
+
+    <p>
+      Live passthrough with simulated heat targets.
+    </p>
+
+    <p>
+      <strong>Grip:</strong> place a heat target.<br />
+      <strong>Trigger:</strong> sting the target you aim at.
+    </p>
+
+    <button id="start" disabled>Loading…</button>
+
+    <p id="status">Starting the application…</p>
+
+    <p class="note">
+      Open this page in the Meta Quest browser.
+      Thermal colours are artistic, not measured temperatures.
+      Targets do not automatically track people.
+    </p>
+  </div>
+
+  <script type="module">
+    import("./main.js").catch((error) => {
+      console.error(error);
+      document.getElementById("status").textContent =
+        "Could not load the app: " + error.message;
+    });
+  </script>
+</body>
+</html>
