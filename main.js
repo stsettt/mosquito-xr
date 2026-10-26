@@ -2,44 +2,55 @@ import * as THREE from
   "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js";
 
 // ============================================================
-// MOSQUITO SENSORY VISION
+// MOSQUITO SENSORY V6
 //
-// Artistic mixed-reality overlays, not measured thermal data.
-// Hosts are manually placed and do not track real people.
+// Artistic passthrough overlays, not genuine thermal sensing.
+// Host signatures are manually placed and remain stationary.
 // All distances are in metres.
 // ============================================================
 
-const SETTINGS = {
-  placeDistance: 0.95,
-  stingDistance: 1.8,
-  acquisitionTime: 0.35,
-  cooldown: 0.9,
-  maxHosts: 6,
-
-  visorOpacity: 0.055,
-  atmosphereParticles: 140,
-  scentParticles: 32,
+const CONFIG = {
+  version: "SENSORY V6",
+  placementDistance: 1.0,
+  stingDistance: 2.0,
+  acquisitionSeconds: 0.35,
+  cooldownSeconds: 0.9,
+  maximumHosts: 6,
+  environmentParticles: 180,
+  scentParticles: 40,
+  visorOpacity: 0.075,
   showFloorRipples: true
 };
 
-const COLORS = {
-  cool: 0x263fa3,
+const COLOR = {
+  blue: 0x263fa3,
   violet: 0x773cc4,
   magenta: 0xed2875,
   orange: 0xff7935,
   cream: 0xfff0b3
 };
 
+// Reuse the elements from your existing index.html.
 const startButton = document.getElementById("start");
-const statusElement = document.getElementById("status");
+const statusText = document.getElementById("status");
 const panel = document.getElementById("panel");
 
+if (!startButton || !statusText || !panel) {
+  throw new Error(
+    "index.html must contain elements with IDs: start, status, panel."
+  );
+}
+
+startButton.disabled = true;
+startButton.textContent = "Loading sensory vision…";
+statusText.textContent = `${CONFIG.version} is loading.`;
+
 // ============================================================
-// SCENE
-// Keep the background transparent for passthrough.
+// SCENE AND TRANSPARENT RENDERER
 // ============================================================
 
 const scene = new THREE.Scene();
+// Do not add an opaque scene.background.
 
 const camera = new THREE.PerspectiveCamera(
   70,
@@ -52,8 +63,8 @@ camera.position.set(0, 1.6, 0);
 scene.add(camera);
 
 const renderer = new THREE.WebGLRenderer({
-  alpha: true,
-  antialias: true
+  antialias: true,
+  alpha: true
 });
 
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -72,134 +83,223 @@ document.body.appendChild(renderer.domElement);
 const hosts = [];
 const controllers = [];
 
-const raycaster = new THREE.Raycaster();
-const rayOrigin = new THREE.Vector3();
-const rayDirection = new THREE.Vector3();
-const rotationMatrix = new THREE.Matrix4();
-
 const headPosition = new THREE.Vector3(0, 1.6, 0);
 const headQuaternion = new THREE.Quaternion();
 
+const raycaster = new THREE.Raycaster();
+const rayOrigin = new THREE.Vector3();
+const rayDirection = new THREE.Vector3();
+const rayRotation = new THREE.Matrix4();
+
+const tempPosition = new THREE.Vector3();
+const inverseHeadRotation = new THREE.Quaternion();
+
 let activeSession = null;
-let seedOnNextFrame = false;
-
-let stingCount = 0;
+let needsInitialHosts = false;
 let previousTime = null;
-let nowSeconds = 0;
+let now = 0;
+let stingCount = 0;
 let proboscisUntil = 0;
+
+let feedback = "";
 let feedbackUntil = 0;
-let feedbackText = "";
-let lastHUDText = "";
+let lastHUDKey = "";
 
-const PATCH_OFFSET = new THREE.Vector3(-0.12, 0.24, 0.25);
+// The sting patch is positioned at the upper-left torso.
+const PATCH_OFFSET = new THREE.Vector3(-0.12, 0.22, 0.22);
 
 // ============================================================
-// MATERIAL HELPERS
+// HELPERS
 // ============================================================
 
-function overlayMaterial(color, opacity = 1) {
+function transparentMaterial(color, opacity) {
   return new THREE.MeshBasicMaterial({
     color,
-    transparent: true,
     opacity,
+    transparent: true,
     side: THREE.DoubleSide,
     depthWrite: false
   });
 }
 
-function createParticleTexture() {
+function makeCanvasTexture(width, height, draw) {
   const canvas = document.createElement("canvas");
-  canvas.width = 64;
-  canvas.height = 64;
+  canvas.width = width;
+  canvas.height = height;
 
   const context = canvas.getContext("2d");
 
   if (!context) {
-    throw new Error("Could not create particle texture.");
+    throw new Error("Could not create a canvas texture.");
   }
 
+  draw(context, canvas);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+
+  return texture;
+}
+
+const particleTexture = makeCanvasTexture(64, 64, (context) => {
   const gradient = context.createRadialGradient(
     32, 32, 0,
     32, 32, 32
   );
 
   gradient.addColorStop(0, "rgba(255,255,255,1)");
-  gradient.addColorStop(0.25, "rgba(255,255,255,0.8)");
+  gradient.addColorStop(0.25, "rgba(255,255,255,0.7)");
   gradient.addColorStop(1, "rgba(255,255,255,0)");
 
   context.fillStyle = gradient;
   context.fillRect(0, 0, 64, 64);
+});
 
-  return new THREE.CanvasTexture(canvas);
+function showFeedback(message, seconds = 1.2) {
+  feedback = message;
+  feedbackUntil = now + seconds;
 }
 
-const particleTexture = createParticleTexture();
-
 // ============================================================
-// HEAD-ATTACHED SENSORY VISOR
-// A tint, NOT a thermal transformation of camera pixels.
+// COOL SENSORY VISOR
+// This tints the view; it does not process camera pixels.
 // ============================================================
 
 const visor = new THREE.Mesh(
   new THREE.PlaneGeometry(4, 4),
-  overlayMaterial(COLORS.cool, SETTINGS.visorOpacity)
+  transparentMaterial(COLOR.blue, CONFIG.visorOpacity)
 );
 
-visor.position.z = -1;
+visor.position.z = -1.05;
 visor.material.depthTest = false;
 visor.renderOrder = 100;
 camera.add(visor);
 
-function createHeadLine(points, color) {
+// ============================================================
+// COMPOUND-EYE OVERLAY
+// Stronger around the periphery; clearer in the centre.
+// ============================================================
+
+const eyeTexture = makeCanvasTexture(1024, 1024, (context) => {
+  const gradient = context.createRadialGradient(
+    512, 512, 150,
+    512, 512, 720
+  );
+
+  gradient.addColorStop(0, "rgba(25,10,50,0)");
+  gradient.addColorStop(0.5, "rgba(65,20,110,0.06)");
+  gradient.addColorStop(1, "rgba(65,20,110,0.30)");
+
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, 1024, 1024);
+
+  const radius = 48;
+  const hexHeight = Math.sqrt(3) * radius;
+
+  context.lineWidth = 1.8;
+
+  for (let column = -1; column < 17; column++) {
+    for (let row = -1; row < 15; row++) {
+      const x = column * radius * 1.5;
+      const y =
+        row * hexHeight +
+        (Math.abs(column % 2) === 1 ? hexHeight / 2 : 0);
+
+      const distance = Math.hypot(x - 512, y - 512);
+      const strength = Math.min(1, distance / 650);
+      const alpha = 0.045 + strength * 0.20;
+
+      context.strokeStyle =
+        `rgba(190,125,255,${alpha})`;
+
+      context.beginPath();
+
+      for (let corner = 0; corner < 6; corner++) {
+        const angle = corner * Math.PI / 3;
+        const px = x + Math.cos(angle) * radius;
+        const py = y + Math.sin(angle) * radius;
+
+        if (corner === 0) {
+          context.moveTo(px, py);
+        } else {
+          context.lineTo(px, py);
+        }
+      }
+
+      context.closePath();
+      context.stroke();
+    }
+  }
+});
+
+const compoundEye = new THREE.Mesh(
+  new THREE.PlaneGeometry(4, 4),
+  new THREE.MeshBasicMaterial({
+    map: eyeTexture,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false
+  })
+);
+
+compoundEye.position.z = -1.02;
+compoundEye.renderOrder = 101;
+camera.add(compoundEye);
+
+// ============================================================
+// ANTENNAE AND PROBOSCIS
+// ============================================================
+
+function makeHeadLine(points, color) {
   const geometry = new THREE.BufferGeometry().setFromPoints(
     points.map((point) => new THREE.Vector3(...point))
   );
 
-  const material = new THREE.LineBasicMaterial({
-    color,
-    transparent: true,
-    opacity: 0.3,
-    depthTest: false,
-    depthWrite: false
-  });
+  const line = new THREE.Line(
+    geometry,
+    new THREE.LineBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.5,
+      depthTest: false,
+      depthWrite: false
+    })
+  );
 
-  const line = new THREE.Line(geometry, material);
   line.renderOrder = 110;
   camera.add(line);
 
   return line;
 }
 
-const leftAntenna = createHeadLine(
+const leftAntenna = makeHeadLine(
   [
-    [-0.16, 0.12, -0.4],
+    [-0.15, 0.12, -0.4],
     [-0.23, 0.20, -0.5],
-    [-0.29, 0.26, -0.6]
+    [-0.30, 0.26, -0.6]
   ],
-  COLORS.magenta
+  COLOR.magenta
 );
 
-const rightAntenna = createHeadLine(
+const rightAntenna = makeHeadLine(
   [
-    [0.16, 0.12, -0.4],
+    [0.15, 0.12, -0.4],
     [0.23, 0.20, -0.5],
-    [0.29, 0.26, -0.6]
+    [0.30, 0.26, -0.6]
   ],
-  COLORS.magenta
+  COLOR.magenta
 );
 
-const proboscis = createHeadLine(
+const proboscis = makeHeadLine(
   [
     [0, -0.13, -0.3],
     [0, -0.08, -0.6]
   ],
-  COLORS.cream
+  COLOR.cream
 );
 
-proboscis.material.opacity = 0.65;
-
 // ============================================================
-// HUD
+// HEADSET HUD
 // ============================================================
 
 const hudCanvas = document.createElement("canvas");
@@ -216,7 +316,7 @@ const hudTexture = new THREE.CanvasTexture(hudCanvas);
 hudTexture.colorSpace = THREE.SRGBColorSpace;
 
 const hud = new THREE.Mesh(
-  new THREE.PlaneGeometry(0.86, 0.215),
+  new THREE.PlaneGeometry(0.88, 0.22),
   new THREE.MeshBasicMaterial({
     map: hudTexture,
     transparent: true,
@@ -231,9 +331,8 @@ camera.add(hud);
 
 function updateHUD(message) {
   const key = `${stingCount}|${message}`;
-
-  if (key === lastHUDText) return;
-  lastHUDText = key;
+  if (key === lastHUDKey) return;
+  lastHUDKey = key;
 
   hudContext.clearRect(0, 0, 1024, 256);
 
@@ -242,105 +341,101 @@ function updateHUD(message) {
 
   hudContext.textAlign = "center";
   hudContext.fillStyle = "#FFF0B3";
-  hudContext.font = "bold 68px sans-serif";
-  hudContext.fillText(`STINGS: ${stingCount}`, 512, 95);
+  hudContext.font = "bold 50px sans-serif";
+
+  hudContext.fillText(
+    `${CONFIG.version} · STINGS: ${stingCount}`,
+    512,
+    85
+  );
 
   hudContext.fillStyle = "#E8DCFF";
   hudContext.font = "30px sans-serif";
-  hudContext.fillText(message, 512, 155);
+  hudContext.fillText(message, 512, 145);
 
-  // Decorative reservoir: fills across each group of 10 stings.
+  // Decorative reservoir: fills over groups of ten stings.
   const fill = stingCount === 0
     ? 0
-    : ((stingCount - 1) % 10 + 1) / 10;
+    : (((stingCount - 1) % 10) + 1) / 10;
 
   hudContext.fillStyle = "#382455";
-  hudContext.fillRect(212, 195, 600, 14);
+  hudContext.fillRect(212, 190, 600, 16);
 
   hudContext.fillStyle = "#FF7935";
-  hudContext.fillRect(212, 195, 600 * fill, 14);
+  hudContext.fillRect(212, 190, 600 * fill, 16);
 
   hudTexture.needsUpdate = true;
 }
 
-function showFeedback(text, duration = 1.2) {
-  feedbackText = text;
-  feedbackUntil = nowSeconds + duration;
-}
-
-updateHUD("Grip: place host | Aim: acquire | Trigger: sting");
-
 // ============================================================
-// ENVIRONMENTAL SENSORY FIELD
-// These objects are fictional spatial graphics.
-// They do not reconstruct walls or furniture.
+// ENVIRONMENTAL PARTICLES AND FLOOR RIPPLE GRAPHICS
+// These do not scan or reconstruct the real room.
 // ============================================================
 
-const atmosphere = new THREE.Group();
-scene.add(atmosphere);
+const environment = new THREE.Group();
+scene.add(environment);
 
-const atmospherePositions = new Float32Array(
-  SETTINGS.atmosphereParticles * 3
+const environmentPositions = new Float32Array(
+  CONFIG.environmentParticles * 3
 );
 
-const atmosphereSeeds = [];
+const environmentSeeds = [];
 
-for (let i = 0; i < SETTINGS.atmosphereParticles; i++) {
-  atmosphereSeeds.push({
+for (let i = 0; i < CONFIG.environmentParticles; i++) {
+  environmentSeeds.push({
     x: (Math.random() - 0.5) * 7,
-    y: 0.2 + Math.random() * 2.6,
+    y: 0.15 + Math.random() * 2.7,
     z: (Math.random() - 0.5) * 7,
     phase: Math.random() * Math.PI * 2
   });
 }
 
-const atmosphereGeometry = new THREE.BufferGeometry();
+const environmentGeometry = new THREE.BufferGeometry();
 
-atmosphereGeometry.setAttribute(
+environmentGeometry.setAttribute(
   "position",
-  new THREE.BufferAttribute(atmospherePositions, 3)
+  new THREE.BufferAttribute(environmentPositions, 3)
 );
 
-const atmospherePoints = new THREE.Points(
-  atmosphereGeometry,
+const environmentPoints = new THREE.Points(
+  environmentGeometry,
   new THREE.PointsMaterial({
-    color: COLORS.violet,
+    color: COLOR.violet,
     map: particleTexture,
-    size: 0.035,
+    size: 0.045,
+    opacity: 0.45,
     transparent: true,
-    opacity: 0.32,
     depthWrite: false,
     sizeAttenuation: true
   })
 );
 
-// Positions change continuously.
-atmospherePoints.frustumCulled = false;
-atmosphere.add(atmospherePoints);
+environmentPoints.frustumCulled = false;
+environment.add(environmentPoints);
 
 const floorRipples = [];
 
-if (SETTINGS.showFloorRipples) {
+if (CONFIG.showFloorRipples) {
   for (let i = 0; i < 3; i++) {
     const ring = new THREE.Mesh(
       new THREE.RingGeometry(0.98, 1, 64),
-      overlayMaterial(COLORS.violet, 0.08)
+      transparentMaterial(COLOR.violet, 0.10)
     );
 
     ring.rotation.x = -Math.PI / 2;
     ring.position.y = 0.025;
 
-    atmosphere.add(ring);
+    environment.add(ring);
     floorRipples.push(ring);
   }
 }
 
 // ============================================================
-// HOST AURA SHADER
-// Violet silhouette -> magenta -> orange centre.
+// FALSE-COLOUR MATERIAL FOR VIRTUAL HOST PARTS
+// The gradient applies ONLY to these virtual meshes.
 // ============================================================
 
-function createAuraMaterial() {
+function makeHeatMaterial() {
   return new THREE.ShaderMaterial({
     uniforms: {
       uTime: { value: 0 },
@@ -350,11 +445,11 @@ function createAuraMaterial() {
 
     vertexShader: `
       varying vec3 vNormalView;
-      varying vec3 vLocal;
+      varying vec3 vLocalPosition;
 
       void main() {
-        vLocal = position;
         vNormalView = normalize(normalMatrix * normal);
+        vLocalPosition = position;
 
         gl_Position =
           projectionMatrix *
@@ -369,7 +464,7 @@ function createAuraMaterial() {
       uniform float uFlash;
 
       varying vec3 vNormalView;
-      varying vec3 vLocal;
+      varying vec3 vLocalPosition;
 
       void main() {
         float facing = max(
@@ -379,14 +474,13 @@ function createAuraMaterial() {
 
         float heat = pow(facing, 0.7);
 
-        // Decorative variation across the virtual torso.
-        float band = 0.04 * sin(
-          vLocal.y * 22.0 - uTime * 1.4
+        heat += 0.035 * sin(
+          vLocalPosition.y * 24.0 - uTime * 1.8
         );
 
-        heat = clamp(heat + band, 0.0, 1.0);
+        heat = clamp(heat, 0.0, 1.0);
 
-        vec3 violet = vec3(0.22, 0.08, 0.48);
+        vec3 violet = vec3(0.30, 0.08, 0.55);
         vec3 magenta = vec3(0.93, 0.16, 0.46);
         vec3 orange = vec3(1.0, 0.47, 0.21);
         vec3 cream = vec3(1.0, 0.94, 0.70);
@@ -394,25 +488,28 @@ function createAuraMaterial() {
         vec3 color = mix(
           violet,
           magenta,
-          smoothstep(0.0, 0.65, heat)
+          smoothstep(0.0, 0.55, heat)
         );
 
         color = mix(
           color,
           orange,
-          smoothstep(0.55, 1.0, heat) *
-          (0.4 + uFocus * 0.6)
+          smoothstep(0.45, 0.95, heat)
         );
 
-        color = mix(color, cream, uFlash * 0.6);
+        color = mix(
+          color,
+          cream,
+          smoothstep(0.82, 1.0, heat) *
+          (0.25 + uFocus * 0.45)
+        );
 
-        float pulse = 0.035 * sin(uTime * 2.2);
+        color = mix(color, cream, uFlash * 0.7);
 
         float alpha =
-          0.17 +
-          heat * 0.22 +
-          uFocus * 0.10 +
-          pulse;
+          0.24 +
+          heat * 0.20 +
+          uFocus * 0.08;
 
         gl_FragColor = vec4(color, alpha);
 
@@ -427,66 +524,113 @@ function createAuraMaterial() {
 }
 
 // ============================================================
-// HOST CREATION
-//
-// The placement point is the sting patch itself.
-// The torso is positioned around that patch.
+// HOST SIGNATURES: HEAD, SHOULDERS, TORSO, ARMS
 // ============================================================
 
 function disposeHost(host) {
   scene.remove(host);
 
+  const geometries = new Set();
+  const materials = new Set();
+
   host.traverse((object) => {
-    object.geometry?.dispose();
+    if (object.geometry) geometries.add(object.geometry);
 
     if (Array.isArray(object.material)) {
-      object.material.forEach((material) => material.dispose());
-    } else {
-      object.material?.dispose();
+      object.material.forEach((material) => materials.add(material));
+    } else if (object.material) {
+      materials.add(object.material);
     }
   });
 
-  // particleTexture is shared; do not dispose it here.
+  geometries.forEach((geometry) => geometry.dispose());
+  materials.forEach((material) => material.dispose());
+
+  // Shared particleTexture is intentionally not disposed.
 }
 
 function clearHosts() {
-  for (const host of hosts) disposeHost(host);
+  hosts.forEach(disposeHost);
   hosts.length = 0;
 }
 
 function createHost(stingPosition) {
-  if (hosts.length >= SETTINGS.maxHosts) {
+  if (hosts.length >= CONFIG.maximumHosts) {
     disposeHost(hosts.shift());
   }
 
   const host = new THREE.Group();
 
-  // Face the user at placement time.
-  const yaw = Math.atan2(
+  // Face the user when placed; remain stationary afterwards.
+  host.rotation.y = Math.atan2(
     headPosition.x - stingPosition.x,
     headPosition.z - stingPosition.z
   );
-
-  host.rotation.y = yaw;
 
   const rotatedOffset = PATCH_OFFSET.clone()
     .applyQuaternion(host.quaternion);
 
   host.position.copy(stingPosition).sub(rotatedOffset);
 
-  // Torso-shaped aura.
-  const aura = new THREE.Mesh(
-    new THREE.CapsuleGeometry(0.23, 0.55, 5, 20),
-    createAuraMaterial()
+  const heatMaterial = makeHeatMaterial();
+
+  // Torso.
+  const torso = new THREE.Mesh(
+    new THREE.CapsuleGeometry(0.23, 0.48, 5, 20),
+    heatMaterial
   );
 
-  aura.scale.set(1.05, 1, 0.65);
-  host.add(aura);
+  torso.scale.z = 0.65;
+  host.add(torso);
 
-  // Outer patch: this is the raycast interaction surface.
+  // Head.
+  const head = new THREE.Mesh(
+    new THREE.SphereGeometry(0.14, 20, 14),
+    heatMaterial
+  );
+
+  head.position.set(0, 0.64, 0);
+  head.scale.set(0.88, 1.05, 0.85);
+  host.add(head);
+
+  // Shoulders.
+  const shoulders = new THREE.Mesh(
+    new THREE.SphereGeometry(1, 20, 12),
+    heatMaterial
+  );
+
+  shoulders.position.set(0, 0.30, 0);
+  shoulders.scale.set(0.32, 0.10, 0.15);
+  host.add(shoulders);
+
+  // Arms.
+  for (const side of [-1, 1]) {
+    const arm = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.06, 0.35, 4, 12),
+      heatMaterial
+    );
+
+    arm.position.set(side * 0.29, 0.015, 0);
+    arm.rotation.z = side * 0.15;
+    arm.scale.z = 0.8;
+
+    host.add(arm);
+  }
+
+  // Small bright inner torso.
+  const innerTorso = new THREE.Mesh(
+    new THREE.CapsuleGeometry(0.10, 0.23, 4, 16),
+    transparentMaterial(COLOR.cream, 0.12)
+  );
+
+  innerTorso.position.z = 0.05;
+  innerTorso.scale.z = 0.5;
+  host.add(innerTorso);
+
+  // Actual interactive sting patch.
   const patch = new THREE.Mesh(
-    new THREE.CircleGeometry(0.085, 32),
-    overlayMaterial(COLORS.magenta, 0.85)
+    new THREE.CircleGeometry(0.10, 32),
+    transparentMaterial(COLOR.magenta, 0.85)
   );
 
   patch.position.copy(PATCH_OFFSET);
@@ -495,67 +639,68 @@ function createHost(stingPosition) {
   host.add(patch);
 
   const warmPatch = new THREE.Mesh(
-    new THREE.CircleGeometry(0.058, 32),
-    overlayMaterial(COLORS.orange, 0.95)
+    new THREE.CircleGeometry(0.070, 32),
+    transparentMaterial(COLOR.orange, 0.95)
   );
 
   warmPatch.position.z = 0.003;
   patch.add(warmPatch);
 
   const core = new THREE.Mesh(
-    new THREE.CircleGeometry(0.027, 24),
-    overlayMaterial(COLORS.cream, 0.35)
+    new THREE.CircleGeometry(0.030, 24),
+    transparentMaterial(COLOR.cream, 0.4)
   );
 
   core.position.z = 0.006;
   patch.add(core);
 
-  // Three incomplete ring segments.
+  // Three rotating acquisition segments.
   const segments = new THREE.Group();
+
   segments.position.copy(PATCH_OFFSET);
-  segments.position.z += 0.012;
+  segments.position.z += 0.015;
   host.add(segments);
 
   for (let i = 0; i < 3; i++) {
     const segment = new THREE.Mesh(
       new THREE.RingGeometry(
-        0.105,
-        0.114,
+        0.125,
+        0.136,
         24,
         1,
         i * Math.PI * 2 / 3,
-        Math.PI * 0.47
+        Math.PI * 0.48
       ),
-      overlayMaterial(COLORS.magenta, 0.6)
+      transparentMaterial(COLOR.magenta, 0.7)
     );
 
     segments.add(segment);
   }
 
-  // Closed ring appears when acquisition is complete.
+  // Complete ring means ready.
   const closedRing = new THREE.Mesh(
-    new THREE.RingGeometry(0.103, 0.115, 48),
-    overlayMaterial(COLORS.cream, 0.95)
+    new THREE.RingGeometry(0.125, 0.138, 48),
+    transparentMaterial(COLOR.cream, 0.95)
   );
 
   closedRing.position.copy(segments.position);
   closedRing.visible = false;
   host.add(closedRing);
 
-  // Expanding sting ripple.
-  const stingRipple = new THREE.Mesh(
-    new THREE.RingGeometry(0.09, 0.10, 48),
-    overlayMaterial(COLORS.orange, 0)
+  // Sting ripple.
+  const ripple = new THREE.Mesh(
+    new THREE.RingGeometry(0.10, 0.112, 48),
+    transparentMaterial(COLOR.orange, 0)
   );
 
-  stingRipple.position.copy(segments.position);
-  stingRipple.position.z += 0.005;
-  host.add(stingRipple);
+  ripple.position.copy(segments.position);
+  ripple.position.z += 0.005;
+  ripple.visible = false;
+  host.add(ripple);
 
-  // Scent particles: curved fictional trail extending
-  // from the patch towards the space in front of the host.
+  // Scent trail.
   const scentPositions = new Float32Array(
-    SETTINGS.scentParticles * 3
+    CONFIG.scentParticles * 3
   );
 
   const scentGeometry = new THREE.BufferGeometry();
@@ -568,11 +713,11 @@ function createHost(stingPosition) {
   const scent = new THREE.Points(
     scentGeometry,
     new THREE.PointsMaterial({
-      color: COLORS.magenta,
+      color: COLOR.magenta,
       map: particleTexture,
-      size: 0.045,
+      size: 0.06,
+      opacity: 0.75,
       transparent: true,
-      opacity: 0.65,
       depthWrite: false,
       sizeAttenuation: true
     })
@@ -582,15 +727,14 @@ function createHost(stingPosition) {
   host.add(scent);
 
   host.userData = {
-    aura,
+    heatMaterial,
     patch,
     core,
     segments,
     closedRing,
-    stingRipple,
+    ripple,
     scent,
     scentPositions,
-
     focus: 0,
     aimed: false,
     ready: false,
@@ -604,104 +748,108 @@ function createHost(stingPosition) {
   return host;
 }
 
-// Desktop visual preview.
-createHost(new THREE.Vector3(0, 1.4, -1.2));
+// Desktop preview. These are replaced when XR starts.
+createHost(new THREE.Vector3(-0.45, 1.4, -1.4));
+createHost(new THREE.Vector3(0.45, 1.4, -1.4));
 
 // ============================================================
-// CONTROLLER AIMING
+// CONTROLLER RAYS AND STING INTERACTION
 // ============================================================
 
 function setControllerRay(controller) {
   scene.updateMatrixWorld(true);
 
   rayOrigin.setFromMatrixPosition(controller.matrixWorld);
-  rotationMatrix.extractRotation(controller.matrixWorld);
+  rayRotation.extractRotation(controller.matrixWorld);
 
   rayDirection
     .set(0, 0, -1)
-    .applyMatrix4(rotationMatrix)
+    .applyMatrix4(rayRotation)
     .normalize();
 
   raycaster.set(rayOrigin, rayDirection);
   raycaster.near = 0;
-  raycaster.far = SETTINGS.stingDistance;
+  raycaster.far = CONFIG.stingDistance;
 }
 
-function getAimedHost(controller) {
-  if (!controller.userData.inputSource || !controller.visible) {
+function getControllerHit(controller) {
+  if (!controller.visible || !controller.userData.inputSource) {
     return null;
   }
 
   setControllerRay(controller);
 
   const patches = hosts.map((host) => host.userData.patch);
-
-  // Only the sting patches count, not the entire aura.
   const hits = raycaster.intersectObjects(patches, false);
 
-  return hits.length
-    ? hits[0].object.userData.host
-    : null;
+  return hits.length ? hits[0] : null;
 }
 
 function placeHost(controller) {
-  if (!renderer.xr.isPresenting) return;
+  if (!renderer.xr.isPresenting || !controller.visible) return;
 
   setControllerRay(controller);
 
   const position = rayOrigin.clone().addScaledVector(
     rayDirection,
-    SETTINGS.placeDistance
+    CONFIG.placementDistance
   );
 
   createHost(position);
-
-  showFeedback("Host placed. Aim at the warm patch.");
+  showFeedback("Host placed — aim at the orange patch.");
 }
 
 function sting(controller) {
   if (!renderer.xr.isPresenting) return;
 
-  const host = getAimedHost(controller);
+  const hit = getControllerHit(controller);
 
-  if (!host) {
-    showFeedback("Aim at the small warm sting patch.");
+  if (!hit) {
+    showFeedback("Aim at a small orange sting patch.");
     return;
   }
 
+  const host = hit.object.userData.host;
   const data = host.userData;
 
-  if (nowSeconds - data.lastStung < SETTINGS.cooldown) {
+  if (now - data.lastStung < CONFIG.cooldownSeconds) {
     showFeedback("Recovering…", 0.5);
     return;
   }
 
-  if (!data.ready) {
+  // This specific controller must have acquired the host.
+  if (
+    controller.userData.aimedHost !== host ||
+    controller.userData.aimTime < CONFIG.acquisitionSeconds
+  ) {
     showFeedback("Hold your aim until the ring closes.");
     return;
   }
 
-  data.lastStung = nowSeconds;
+  data.lastStung = now;
   data.focus = 0;
   data.ready = false;
 
+  for (const other of controllers) {
+    if (other.userData.aimedHost === host) {
+      other.userData.aimTime = 0;
+    }
+  }
+
   stingCount += 1;
-  proboscisUntil = nowSeconds + 0.2;
+  proboscisUntil = now + 0.2;
 
   showFeedback("Sting collected!");
 
-  // Optional controller vibration.
   const actuator =
     controller.userData.inputSource
       ?.gamepad?.hapticActuators?.[0];
 
   if (actuator) {
     try {
-      Promise.resolve(
-        actuator.pulse(0.45, 90)
-      ).catch(() => {});
+      Promise.resolve(actuator.pulse(0.45, 90)).catch(() => {});
     } catch {
-      // Haptics must not interrupt the experience.
+      // Optional vibration must not interrupt the app.
     }
   }
 }
@@ -709,12 +857,18 @@ function sting(controller) {
 for (let i = 0; i < 2; i++) {
   const controller = renderer.xr.getController(i);
 
+  controller.userData.inputSource = null;
+  controller.userData.aimedHost = null;
+  controller.userData.aimTime = 0;
+
   controller.addEventListener("connected", (event) => {
     controller.userData.inputSource = event.data;
   });
 
   controller.addEventListener("disconnected", () => {
     controller.userData.inputSource = null;
+    controller.userData.aimedHost = null;
+    controller.userData.aimTime = 0;
   });
 
   controller.addEventListener("selectstart", () => {
@@ -725,22 +879,222 @@ for (let i = 0; i < 2; i++) {
     placeHost(controller);
   });
 
-  // A short pointer replaces the previous long laser.
+  // Short pointer instead of a long shooting-style laser.
   const pointer = new THREE.Line(
     new THREE.BufferGeometry().setFromPoints([
       new THREE.Vector3(0, 0, 0),
-      new THREE.Vector3(0, 0, -0.14)
+      new THREE.Vector3(0, 0, -0.18)
     ]),
     new THREE.LineBasicMaterial({
-      color: COLORS.cream,
+      color: COLOR.cream,
       transparent: true,
-      opacity: 0.7
+      opacity: 0.75
     })
   );
 
   controller.add(pointer);
+
+  // World-space dot appears when a patch is hit.
+  const aimDot = new THREE.Mesh(
+    new THREE.SphereGeometry(0.008, 10, 8),
+    new THREE.MeshBasicMaterial({
+      color: COLOR.cream,
+      depthTest: false
+    })
+  );
+
+  aimDot.visible = false;
+  aimDot.renderOrder = 20;
+  scene.add(aimDot);
+
+  controller.userData.aimDot = aimDot;
+
   scene.add(controller);
   controllers.push(controller);
+}
+
+// ============================================================
+// ANIMATION HELPERS
+// ============================================================
+
+function updateEnvironment(time) {
+  environmentSeeds.forEach((seed, i) => {
+    const index = i * 3;
+
+    environmentPositions[index] =
+      seed.x + Math.sin(time * 0.18 + seed.phase) * 0.12;
+
+    environmentPositions[index + 1] =
+      seed.y + Math.sin(time * 0.28 + seed.phase) * 0.08;
+
+    environmentPositions[index + 2] =
+      seed.z + Math.cos(time * 0.16 + seed.phase) * 0.12;
+  });
+
+  environmentGeometry.attributes.position.needsUpdate = true;
+
+  floorRipples.forEach((ring, i) => {
+    const cycle = (time * 0.09 + i / 3) % 1;
+
+    ring.scale.setScalar(0.4 + cycle * 3.6);
+    ring.material.opacity = (1 - cycle) * 0.11;
+  });
+}
+
+function updateAiming(delta) {
+  for (const host of hosts) {
+    host.userData.aimed = false;
+    host.userData.focus = 0;
+    host.userData.ready = false;
+  }
+
+  for (const controller of controllers) {
+    const hit = renderer.xr.isPresenting
+      ? getControllerHit(controller)
+      : null;
+
+    const host = hit ? hit.object.userData.host : null;
+    const dot = controller.userData.aimDot;
+
+    dot.visible = Boolean(hit);
+
+    if (hit) dot.position.copy(hit.point);
+
+    if (controller.userData.aimedHost !== host) {
+      controller.userData.aimedHost = host;
+      controller.userData.aimTime = 0;
+    }
+
+    if (!host) {
+      controller.userData.aimTime = 0;
+      continue;
+    }
+
+    const data = host.userData;
+    const recovering =
+      now - data.lastStung < CONFIG.cooldownSeconds;
+
+    if (recovering) {
+      controller.userData.aimTime = 0;
+    } else {
+      controller.userData.aimTime += delta;
+    }
+
+    const focus = Math.min(
+      1,
+      controller.userData.aimTime / CONFIG.acquisitionSeconds
+    );
+
+    data.aimed = true;
+    data.focus = Math.max(data.focus, focus);
+    data.ready = !recovering && data.focus >= 1;
+  }
+}
+
+function updateHost(host, time) {
+  const data = host.userData;
+  const age = time - data.lastStung;
+
+  const recovering = age < CONFIG.cooldownSeconds;
+  const flash = Math.max(0, 1 - age / 0.45);
+
+  data.heatMaterial.uniforms.uTime.value = time + data.phase;
+  data.heatMaterial.uniforms.uFocus.value = data.focus;
+  data.heatMaterial.uniforms.uFlash.value = flash;
+
+  data.patch.material.opacity = recovering ? 0.35 : 0.85;
+  data.core.material.opacity = 0.35 + data.focus * 0.65;
+
+  data.segments.visible = !data.ready;
+  data.closedRing.visible = data.ready;
+
+  data.segments.rotation.z = time * 0.4;
+  data.segments.scale.setScalar(1.3 - data.focus * 0.3);
+
+  for (const segment of data.segments.children) {
+    segment.material.color.setHex(
+      data.aimed ? COLOR.orange : COLOR.magenta
+    );
+
+    segment.material.opacity = recovering ? 0.2 : 0.75;
+  }
+
+  data.ripple.visible = age >= 0 && age < 0.65;
+
+  if (data.ripple.visible) {
+    data.ripple.scale.setScalar(1 + age * 5);
+    data.ripple.material.opacity = (1 - age / 0.65) * 0.9;
+  }
+
+  // Fictional scent particles drift out from the host.
+  for (let i = 0; i < CONFIG.scentParticles; i++) {
+    const u = (i / CONFIG.scentParticles + time * 0.10) % 1;
+    const index = i * 3;
+    const swirl = u * Math.PI * 3 + data.phase;
+
+    data.scentPositions[index] =
+      PATCH_OFFSET.x + Math.sin(swirl) * 0.18 * u;
+
+    data.scentPositions[index + 1] =
+      PATCH_OFFSET.y + u * 0.28 + Math.cos(swirl) * 0.05;
+
+    data.scentPositions[index + 2] =
+      PATCH_OFFSET.z + u * 1.45;
+  }
+
+  data.scent.geometry.attributes.position.needsUpdate = true;
+
+  data.scent.material.color.setHex(
+    data.aimed ? COLOR.orange : COLOR.magenta
+  );
+
+  data.scent.material.opacity =
+    recovering ? 0.25 : 0.75 + data.focus * 0.15;
+}
+
+function updateAntennae() {
+  let nearestHost = null;
+  let nearestDistance = Infinity;
+
+  for (const host of hosts) {
+    host.userData.patch.getWorldPosition(tempPosition);
+
+    const distance = tempPosition.distanceTo(headPosition);
+
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearestHost = host;
+    }
+  }
+
+  leftAntenna.material.opacity = 0.25;
+  rightAntenna.material.opacity = 0.25;
+
+  if (!nearestHost) return;
+
+  nearestHost.userData.patch.getWorldPosition(tempPosition);
+
+  inverseHeadRotation.copy(headQuaternion).invert();
+
+  tempPosition
+    .sub(headPosition)
+    .applyQuaternion(inverseHeadRotation)
+    .normalize();
+
+  if (tempPosition.x < -0.15) {
+    leftAntenna.material.opacity = 0.9;
+  } else if (tempPosition.x > 0.15) {
+    rightAntenna.material.opacity = 0.9;
+  } else {
+    leftAntenna.material.opacity = 0.75;
+    rightAntenna.material.opacity = 0.75;
+  }
+
+  const focused = hosts.some((host) => host.userData.aimed);
+  const color = focused ? COLOR.orange : COLOR.magenta;
+
+  leftAntenna.material.color.setHex(color);
+  rightAntenna.material.color.setHex(color);
 }
 
 // ============================================================
@@ -750,15 +1104,15 @@ for (let i = 0; i < 2; i++) {
 async function checkSupport() {
   if (!window.isSecureContext) {
     startButton.textContent = "HTTPS required";
-    statusElement.textContent =
-      "Open the HTTPS version of your published website.";
+    statusText.textContent =
+      `${CONFIG.version}: open the HTTPS published website.`;
     return;
   }
 
   if (!navigator.xr) {
     startButton.textContent = "Desktop preview";
-    statusElement.textContent =
-      "Open this website in the Quest browser for passthrough.";
+    statusText.textContent =
+      `${CONFIG.version} loaded. Open on Quest to enter AR.`;
     return;
   }
 
@@ -768,19 +1122,19 @@ async function checkSupport() {
 
     if (!supported) {
       startButton.textContent = "AR unavailable";
-      statusElement.textContent =
-        "This browser is not reporting immersive-ar support.";
+      statusText.textContent =
+        `${CONFIG.version} loaded, but immersive-ar is unavailable.`;
       return;
     }
 
     startButton.disabled = false;
-    startButton.textContent = "Enter Mosquito Vision";
+    startButton.textContent = "Enter Sensory V6";
 
-    statusElement.textContent =
-      "Ready. Grip places a host; trigger performs a sting.";
+    statusText.textContent =
+      `${CONFIG.version} ready: grip places a host; trigger stings.`;
   } catch (error) {
-    statusElement.textContent =
-      "Support check failed: " + error.message;
+    statusText.textContent =
+      "XR support check failed: " + error.message;
   }
 }
 
@@ -802,33 +1156,42 @@ startButton.addEventListener("click", async () => {
 
     session.addEventListener("end", () => {
       activeSession = null;
-      seedOnNextFrame = false;
+      needsInitialHosts = false;
+
+      for (const controller of controllers) {
+        controller.userData.aimedHost = null;
+        controller.userData.aimTime = 0;
+        controller.userData.aimDot.visible = false;
+      }
 
       panel.style.display = "";
       startButton.disabled = false;
-      startButton.textContent = "Enter Mosquito Vision";
-
-      statusElement.textContent =
-        "Session ended. Re-enter to reset the sting count.";
+      startButton.textContent = "Enter Sensory V6";
+      statusText.textContent = `${CONFIG.version}: session ended.`;
     });
 
     clearHosts();
 
     stingCount = 0;
     feedbackUntil = 0;
-    previousTime = null;
     proboscisUntil = 0;
+    previousTime = null;
+
+    for (const controller of controllers) {
+      controller.userData.aimedHost = null;
+      controller.userData.aimTime = 0;
+    }
 
     await renderer.xr.setSession(session);
 
-    seedOnNextFrame = true;
+    needsInitialHosts = true;
     panel.style.display = "none";
   } catch (error) {
     if (session) {
       try {
         await session.end();
       } catch {
-        // Preserve the original error.
+        // Keep the original startup error.
       }
     }
 
@@ -836,200 +1199,31 @@ startButton.addEventListener("click", async () => {
     panel.style.display = "";
     startButton.disabled = false;
 
-    statusElement.textContent =
+    statusText.textContent =
       "Could not start XR: " + error.message;
 
     console.error(error);
   }
 });
 
-await checkSupport();
-
 // ============================================================
-// ANIMATION HELPERS
-// ============================================================
-
-const tempPosition = new THREE.Vector3();
-const localDirection = new THREE.Vector3();
-const inverseHeadQuaternion = new THREE.Quaternion();
-
-function updateAtmosphere(time) {
-  for (let i = 0; i < atmosphereSeeds.length; i++) {
-    const seed = atmosphereSeeds[i];
-    const index = i * 3;
-
-    atmospherePositions[index] =
-      seed.x + Math.sin(time * 0.18 + seed.phase) * 0.12;
-
-    atmospherePositions[index + 1] =
-      seed.y + Math.sin(time * 0.28 + seed.phase) * 0.08;
-
-    atmospherePositions[index + 2] =
-      seed.z + Math.cos(time * 0.16 + seed.phase) * 0.12;
-  }
-
-  atmosphereGeometry.attributes.position.needsUpdate = true;
-
-  floorRipples.forEach((ring, i) => {
-    const cycle = (time * 0.09 + i / 3) % 1;
-    const radius = 0.4 + cycle * 3.6;
-
-    ring.scale.setScalar(radius);
-    ring.material.opacity = (1 - cycle) * 0.075;
-  });
-}
-
-function updateHost(host, time, delta) {
-  const data = host.userData;
-
-  const recovering =
-    time - data.lastStung < SETTINGS.cooldown;
-
-  const targetFocus = data.aimed && !recovering ? 1 : 0;
-
-  if (targetFocus) {
-    data.focus = Math.min(
-      1,
-      data.focus + delta / SETTINGS.acquisitionTime
-    );
-  } else {
-    // Loss of aim immediately removes sting readiness.
-    data.focus = Math.max(0, data.focus - delta * 4);
-  }
-
-  data.ready =
-    data.aimed &&
-    !recovering &&
-    data.focus >= 1;
-
-  const flashAge = time - data.lastStung;
-  const flash = Math.max(0, 1 - flashAge / 0.45);
-
-  data.aura.material.uniforms.uTime.value = time + data.phase;
-  data.aura.material.uniforms.uFocus.value = data.focus;
-  data.aura.material.uniforms.uFlash.value = flash;
-
-  data.patch.material.opacity = recovering ? 0.4 : 0.85;
-  data.core.material.opacity = 0.3 + data.focus * 0.7;
-
-  data.segments.visible = !data.ready;
-  data.closedRing.visible = data.ready;
-
-  data.segments.rotation.z = time * 0.35;
-  data.segments.scale.setScalar(1.25 - data.focus * 0.25);
-
-  for (const segment of data.segments.children) {
-    segment.material.color.setHex(
-      data.aimed ? COLORS.orange : COLORS.magenta
-    );
-
-    segment.material.opacity = recovering ? 0.2 : 0.6;
-  }
-
-  data.stingRipple.visible = flashAge >= 0 && flashAge < 0.6;
-
-  if (data.stingRipple.visible) {
-    data.stingRipple.scale.setScalar(1 + flashAge * 5);
-    data.stingRipple.material.opacity =
-      (1 - flashAge / 0.6) * 0.9;
-  }
-
-  // Particles flow away from the fictional host signature.
-  for (let i = 0; i < SETTINGS.scentParticles; i++) {
-    const u = (
-      i / SETTINGS.scentParticles +
-      time * 0.10
-    ) % 1;
-
-    const index = i * 3;
-    const swirl = u * Math.PI * 3 + data.phase;
-
-    data.scentPositions[index] =
-      PATCH_OFFSET.x +
-      Math.sin(swirl) * 0.16 * u;
-
-    data.scentPositions[index + 1] =
-      PATCH_OFFSET.y +
-      u * 0.22 +
-      Math.cos(swirl) * 0.05;
-
-    data.scentPositions[index + 2] =
-      PATCH_OFFSET.z + u * 1.45;
-  }
-
-  data.scent.geometry.attributes.position.needsUpdate = true;
-
-  data.scent.material.color.setHex(
-    data.aimed ? COLORS.orange : COLORS.magenta
-  );
-
-  data.scent.material.opacity =
-    recovering ? 0.25 : 0.55 + data.focus * 0.2;
-}
-
-function updateAntennae() {
-  let closest = null;
-  let closestDistance = Infinity;
-
-  for (const host of hosts) {
-    host.userData.patch.getWorldPosition(tempPosition);
-
-    const distance = tempPosition.distanceTo(headPosition);
-
-    if (distance < closestDistance) {
-      closestDistance = distance;
-      closest = host;
-    }
-  }
-
-  leftAntenna.material.opacity = 0.22;
-  rightAntenna.material.opacity = 0.22;
-
-  if (!closest) return;
-
-  closest.userData.patch.getWorldPosition(tempPosition);
-
-  inverseHeadQuaternion.copy(headQuaternion).invert();
-
-  localDirection
-    .copy(tempPosition)
-    .sub(headPosition)
-    .applyQuaternion(inverseHeadQuaternion)
-    .normalize();
-
-  // Left/right cues refer to the nearest manually placed host.
-  if (localDirection.x < -0.15) {
-    leftAntenna.material.opacity = 0.8;
-  } else if (localDirection.x > 0.15) {
-    rightAntenna.material.opacity = 0.8;
-  } else {
-    leftAntenna.material.opacity = 0.65;
-    rightAntenna.material.opacity = 0.65;
-  }
-
-  const focused = hosts.some((host) => host.userData.aimed);
-  const color = focused ? COLORS.orange : COLORS.magenta;
-
-  leftAntenna.material.color.setHex(color);
-  rightAntenna.material.color.setHex(color);
-}
-
-// ============================================================
-// MAIN LOOP
+// MAIN ANIMATION LOOP
 // ============================================================
 
 renderer.setAnimationLoop((milliseconds, frame) => {
-  nowSeconds = milliseconds / 1000;
+  now = milliseconds / 1000;
 
   const delta = previousTime === null
     ? 0
-    : Math.min(nowSeconds - previousTime, 0.05);
+    : Math.max(0, Math.min(now - previousTime, 0.05));
 
-  previousTime = nowSeconds;
+  previousTime = now;
 
   if (frame) {
     const referenceSpace = renderer.xr.getReferenceSpace();
-    const pose = frame.getViewerPose(referenceSpace);
+    const pose = referenceSpace
+      ? frame.getViewerPose(referenceSpace)
+      : null;
 
     if (pose) {
       const position = pose.transform.position;
@@ -1044,9 +1238,8 @@ renderer.setAnimationLoop((milliseconds, frame) => {
         orientation.w
       );
 
-      if (seedOnNextFrame) {
-        // Centre the environmental field on the starting area.
-        atmosphere.position.set(
+      if (needsInitialHosts) {
+        environment.position.set(
           headPosition.x,
           0,
           headPosition.z
@@ -1069,17 +1262,16 @@ renderer.setAnimationLoop((milliseconds, frame) => {
           forward.x
         );
 
-        for (const offset of [-0.45, 0.45]) {
-          const stingPosition = headPosition.clone()
-            .addScaledVector(forward, 1.25)
+        for (const offset of [-0.5, 0.5]) {
+          const position = headPosition.clone()
+            .addScaledVector(forward, 1.4)
             .addScaledVector(right, offset);
 
-          stingPosition.y -= 0.20;
-
-          createHost(stingPosition);
+          position.y -= 0.2;
+          createHost(position);
         }
 
-        seedOnNextFrame = false;
+        needsInitialHosts = false;
       }
     }
   } else {
@@ -1087,50 +1279,36 @@ renderer.setAnimationLoop((milliseconds, frame) => {
     headQuaternion.copy(camera.quaternion);
   }
 
-  // Clear aim state, then combine both controllers' selections.
-  for (const host of hosts) {
-    host.userData.aimed = false;
-  }
-
-  if (renderer.xr.isPresenting) {
-    for (const controller of controllers) {
-      const host = getAimedHost(controller);
-
-      if (host) host.userData.aimed = true;
-    }
-  }
-
-  updateAtmosphere(nowSeconds);
+  updateEnvironment(now);
+  updateAiming(delta);
 
   for (const host of hosts) {
-    updateHost(host, nowSeconds, delta);
+    updateHost(host, now);
   }
 
   scene.updateMatrixWorld(true);
   updateAntennae();
 
-  proboscis.scale.z =
-    nowSeconds < proboscisUntil ? 1.35 : 1;
+  proboscis.scale.z = now < proboscisUntil ? 1.35 : 1;
 
-  let message = "Grip: place host | Follow the scent trail";
+  let message = "Grip: place host | Follow the scent trails";
 
   if (hosts.some((host) => host.userData.aimed)) {
     message = hosts.some((host) => host.userData.ready)
       ? "Host acquired — press trigger"
-      : "Hold aim — acquiring host";
+      : "Hold your aim — acquiring host";
   }
 
-  if (nowSeconds < feedbackUntil) {
-    message = feedbackText;
+  if (now < feedbackUntil) {
+    message = feedback;
   }
 
   updateHUD(message);
-
   renderer.render(scene, camera);
 });
 
 // ============================================================
-// WINDOW RESIZE
+// RESIZE AND SUPPORT CHECK
 // ============================================================
 
 window.addEventListener("resize", () => {
@@ -1141,3 +1319,7 @@ window.addEventListener("resize", () => {
 
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
+
+await checkSupport();
+
+// END OF MOSQUITO SENSORY V6
