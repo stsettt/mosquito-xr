@@ -91,13 +91,14 @@
     </p>
   </div>
 
-  <script type="module">
-  import("./main.js?v=3").catch((error) => {
+ <script type="module">
+  import("./main.js?v=4").catch((error) => {
     console.error(error);
 
     document.getElementById("status").textContent =
       "Could not load the app: " + error.message;
   });
 </script>
+
 </body>
 </html>
