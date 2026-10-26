@@ -74,9 +74,11 @@
     </p>
 
     <p>
-      <strong>Grip:</strong> place a heat target.<br />
-      <strong>Trigger:</strong> sting the target you aim at.
+      <strong>Grip:</strong> place a host signature.<br />
+      <strong>Point:</strong> hold your aim until the ring closes.<br />
+      <strong>Trigger:</strong> sting.
     </p>
+
 
     <button id="start" disabled>Loading…</button>
 
@@ -90,11 +92,12 @@
   </div>
 
   <script type="module">
-    import("./main.js").catch((error) => {
-      console.error(error);
-      document.getElementById("status").textContent =
-        "Could not load the app: " + error.message;
-    });
-  </script>
+  import("./main.js?v=3").catch((error) => {
+    console.error(error);
+
+    document.getElementById("status").textContent =
+      "Could not load the app: " + error.message;
+  });
+</script>
 </body>
 </html>
