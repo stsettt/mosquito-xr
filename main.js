@@ -1127,3 +1127,17 @@ renderer.setAnimationLoop((milliseconds, frame) => {
   updateHUD(message);
 
   renderer.render(scene, camera);
+});
+
+// ============================================================
+// WINDOW RESIZE
+// ============================================================
+
+window.addEventListener("resize", () => {
+  if (renderer.xr.isPresenting) return;
+
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
