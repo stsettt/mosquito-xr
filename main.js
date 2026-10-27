@@ -2,45 +2,45 @@ import * as THREE from
   "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js";
 
 // ============================================================
-// MOSQUITO SENSORY V13
+// MOSQUITO XR — SENSORY V14
 //
-// Default: compact stationary layout in front of the player.
-// No minimum room size, required boundary, or hard spacing test.
+// Random 360-degree layouts.
+// Smaller reported play areas -> smaller, closer targets.
+// Larger reported play areas -> larger, more scattered targets.
+// Missing boundary -> compact 360-degree fallback.
 //
-// Set stationaryMode: false for adaptive boundary layouts:
-//   Small / missing boundary -> compact front-facing targets.
-//   Large boundary -> larger, more widely scattered targets.
+// No required boundary.
+// No minimum room area.
+// No hard target-spacing requirement.
+// Overlapping host bodies do not block aiming rays.
 //
 // Artistic heat simulation only.
-// No person tracking, room scanning, or obstacle detection.
-// Does not change headset safety settings.
+// No real-person tracking, room scanning, or obstacle detection.
+// Does not modify headset safety settings.
 // ============================================================
 
 const CONFIG = {
-  version: "SENSORY V13",
-
-  // Keep true for seated or small stationary installations.
-  // Set false for automatic small-area / large-area layouts.
-  stationaryMode: true,
+  version: "SENSORY V14 · RANDOM 360°",
 
   minimumTargets: 5,
   maximumTargets: 20,
 
-  // Compact layout dimensions are virtual design settings,
-  // not measurements of the physical room.
-  stationaryDistance: 0.95,
-  stationaryTargetScale: 0.24,
-  stationaryHorizontalAngle: 100,
-  stationaryVerticalSpread: 0.52,
+  // When no boundary is available, these are virtual layout
+  // settings, not measurements of the physical room.
+  compactMinimumRadius: 0.45,
+  compactMaximumRadius: 0.95,
+  compactTargetScale: 0.24,
 
-  smallAreaThreshold: 4,
-  narrowAreaThreshold: 1.5,
+  minimumHeightOffset: -0.45,
+  maximumHeightOffset: 0.4,
 
   maximumTargetScale: 1.5,
+
+  // Approximate horizontal model envelope relative to its patch.
   hostHorizontalRadius: 0.7,
 
   maximumPlacementSamples: 12000,
-  maximumPlacementCandidates: 500,
+  maximumPlacementCandidates: 600,
 
   stingDistance: 8,
   acquisitionSeconds: 0.3,
@@ -57,7 +57,6 @@ const CONFIG = {
 
 const COLOR = {
   purple: 0x6815b5,
-  violet: 0xa020f0,
   magenta: 0xff1493,
   orange: 0xff8500,
   yellow: 0xffeb70
@@ -78,13 +77,13 @@ if (!startButton || !statusText || !panel) {
 }
 
 startButton.disabled = true;
-startButton.textContent = "Loading Sensory V13…";
+startButton.textContent = "Loading Sensory V14…";
 
 statusText.textContent =
-  "Preparing compact targets. No minimum play-area size required.";
+  "Preparing random 360° targets. No minimum-space check.";
 
 // ============================================================
-// SCENE AND RENDERER
+// SCENE
 // ============================================================
 
 const scene = new THREE.Scene();
@@ -108,8 +107,6 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
 renderer.setClearColor(0x000000, 0);
 
 renderer.xr.enabled = true;
-
-// Local tracking does not require a play-area boundary.
 renderer.xr.setReferenceSpaceType("local");
 
 document.body.appendChild(renderer.domElement);
@@ -139,12 +136,13 @@ let referenceSpace = null;
 
 let boundary = [];
 let boundarySignature = "";
-let currentLayout = "Stationary";
+let currentLayout = "Compact 360°";
 
 let starting = false;
 let stopping = false;
-let needsRound = false;
+let appReady = false;
 let trackingAvailable = false;
+let needsRound = false;
 
 let nextBoundaryCheck = 0;
 let previousTime = null;
@@ -176,6 +174,21 @@ function random(minimum, maximum) {
 
 function randomInteger(minimum, maximum) {
   return Math.floor(random(minimum, maximum + 1));
+}
+
+function shuffle(array) {
+  for (let i = array.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [array[i], array[j]] = [array[j], array[i]];
+  }
+
+  return array;
+}
+
+function angleDifference(a, b) {
+  return Math.abs(
+    Math.atan2(Math.sin(a - b), Math.cos(a - b))
+  );
 }
 
 function errorMessage(error) {
@@ -212,7 +225,6 @@ function material(color, opacity) {
 
 function canvasTexture(width, height, draw) {
   const canvas = document.createElement("canvas");
-
   canvas.width = width;
   canvas.height = height;
 
@@ -329,8 +341,8 @@ function updateAudio() {
   if (!audioContext || !audioMaster) return;
 
   const audible =
-    session &&
-    session.visibilityState === "visible" &&
+    appReady &&
+    session?.visibilityState === "visible" &&
     soundEnabled &&
     audioAvailable &&
     !stopping;
@@ -355,9 +367,7 @@ function silenceAudio() {
 function toggleSound() {
   soundEnabled = !soundEnabled;
 
-  if (soundEnabled) {
-    prepareAudio();
-  }
+  if (soundEnabled) prepareAudio();
 
   updateAudio();
 
@@ -458,15 +468,11 @@ const eyeTexture = canvasTexture(1024, 1024, (context) => {
 
       for (let corner = 0; corner < 6; corner++) {
         const angle = corner * Math.PI / 3;
-
         const px = x + Math.cos(angle) * radius;
         const py = y + Math.sin(angle) * radius;
 
-        if (corner === 0) {
-          context.moveTo(px, py);
-        } else {
-          context.lineTo(px, py);
-        }
+        if (corner === 0) context.moveTo(px, py);
+        else context.lineTo(px, py);
       }
 
       context.closePath();
@@ -541,7 +547,6 @@ const proboscis = headLine([
 // ============================================================
 
 const hudCanvas = document.createElement("canvas");
-
 hudCanvas.width = 1024;
 hudCanvas.height = 360;
 
@@ -587,7 +592,6 @@ function drawHUD(message) {
   ].join("|");
 
   if (key === lastHUDKey) return;
-
   lastHUDKey = key;
 
   hudContext.clearRect(0, 0, 1024, 360);
@@ -601,9 +605,7 @@ function drawHUD(message) {
 
   hudContext.fillText(
     `${CONFIG.version} · ${currentLayout}`,
-    512,
-    34,
-    980
+    512, 34, 980
   );
 
   hudContext.fillStyle = "#FFEB70";
@@ -611,8 +613,7 @@ function drawHUD(message) {
 
   hudContext.fillText(
     `ROUND ${roundNumber} · ${roundCollected}/${roundTotal}`,
-    512,
-    87
+    512, 87
   );
 
   hudContext.fillStyle = "#FFD6F2";
@@ -622,10 +623,8 @@ function drawHUD(message) {
   hudContext.font = "22px sans-serif";
 
   hudContext.fillText(
-    `Hits: ${totalStings} · L grip: sound · R grip: new round`,
-    512,
-    171,
-    970
+    `Hits: ${totalStings} · L grip: sound · R grip: reshuffle`,
+    512, 171, 970
   );
 
   hudContext.textAlign = "left";
@@ -638,16 +637,14 @@ function drawHUD(message) {
     isPowered()
       ? `BLOOD 100% · POWER-UP ${powerDisplay.toFixed(1)}s`
       : `BLOOD ${bloodLevel}% · Charge to 100%`,
-    150,
-    215
+    150, 215
   );
 
   hudContext.fillStyle = "#44152C";
   hudContext.fillRect(150, 230, 724, 27);
 
   const bloodGradient = hudContext.createLinearGradient(
-    150, 0,
-    874, 0
+    150, 0, 874, 0
   );
 
   bloodGradient.addColorStop(0, "#B80035");
@@ -661,8 +658,7 @@ function drawHUD(message) {
   hudContext.fillStyle = bloodGradient;
 
   hudContext.fillRect(
-    150,
-    230,
+    150, 230,
     724 * bloodLevel / 100,
     27
   );
@@ -686,8 +682,7 @@ function drawHUD(message) {
       : 0;
 
   hudContext.fillRect(
-    150,
-    279,
+    150, 279,
     724 * THREE.MathUtils.clamp(lowerBar, 0, 1),
     12
   );
@@ -699,10 +694,8 @@ function drawHUD(message) {
   hudContext.fillText(
     isPowered()
       ? "POWER ACTIVE: faster target acquisition"
-      : "Point and sting — no walking required by the layout",
-    512,
-    327,
-    970
+      : "Targets around you · point from your position",
+    512, 327, 970
   );
 
   hudTexture.needsUpdate = true;
@@ -710,20 +703,14 @@ function drawHUD(message) {
 
 // ============================================================
 // OPTIONAL BOUNDARY
-// Missing / invalid boundary data never causes a space error.
 // ============================================================
 
 function getPlayAreaSize(polygon) {
   if (polygon.length < 3) {
-    return {
-      area: 0,
-      width: 0,
-      depth: 0
-    };
+    return { area: 0, width: 0, depth: 0 };
   }
 
   let twiceArea = 0;
-
   let minX = Infinity;
   let maxX = -Infinity;
   let minZ = Infinity;
@@ -737,7 +724,6 @@ function getPlayAreaSize(polygon) {
 
     minX = Math.min(minX, a.x);
     maxX = Math.max(maxX, a.x);
-
     minZ = Math.min(minZ, a.z);
     maxZ = Math.max(maxZ, a.z);
   }
@@ -756,34 +742,29 @@ function getPlayAreaSize(polygon) {
 function readBoundary() {
   boundary = [];
 
-  if (!CONFIG.stationaryMode) {
-    try {
-      const points = referenceSpace?.boundsGeometry;
+  try {
+    const points = referenceSpace?.boundsGeometry;
 
-      if (points && points.length >= 3) {
-        const polygon = Array.from(points, (point) => ({
-          x: point.x,
-          z: point.z
-        }));
+    if (points && points.length >= 3) {
+      const polygon = Array.from(points, (point) => ({
+        x: point.x,
+        z: point.z
+      }));
 
-        const valid = polygon.every((point) =>
-          Number.isFinite(point.x) &&
-          Number.isFinite(point.z)
-        );
-
-        if (
-          valid &&
-          getPlayAreaSize(polygon).area > 0.000001
-        ) {
-          boundary = polygon;
-        }
-      }
-    } catch (error) {
-      console.warn(
-        "Boundary unavailable. Using compact layout.",
-        error
+      const valid = polygon.every((point) =>
+        Number.isFinite(point.x) &&
+        Number.isFinite(point.z)
       );
+
+      if (
+        valid &&
+        getPlayAreaSize(polygon).area > Number.EPSILON
+      ) {
+        boundary = polygon;
+      }
     }
+  } catch (error) {
+    console.warn("Using compact layout:", error);
   }
 
   boundarySignature = boundary.length
@@ -813,9 +794,7 @@ function pointInsidePolygon(x, z) {
         (b.z - a.z) + a.x
       );
 
-    if (crosses) {
-      inside = !inside;
-    }
+    if (crosses) inside = !inside;
   }
 
   return inside;
@@ -824,7 +803,6 @@ function pointInsidePolygon(x, z) {
 function distanceToSegment(x, z, a, b) {
   const dx = b.x - a.x;
   const dz = b.z - a.z;
-
   const lengthSquared = dx * dx + dz * dz;
 
   if (lengthSquared === 0) {
@@ -863,90 +841,50 @@ function boundaryClearance(position) {
 }
 
 // ============================================================
-// COMPACT STATIONARY PLACEMENT
+// COMPACT RANDOM 360-DEGREE FALLBACK
 //
-// Targets form a close, front-facing cluster.
-// They stay world-fixed until the next round.
-// Slight model overlap is allowed.
-// No room-size or target-spacing rejection.
+// Loose angular sectors encourage coverage of every side.
+// Distances, heights, sizes and angles are randomized.
+// No grid, single-sided layout, or regular ring.
 // ============================================================
 
-function generateStationaryPositions(requestedCount) {
-  currentLayout = CONFIG.stationaryMode
-    ? "Stationary"
-    : "Compact";
+function generateCompactPositions(requestedCount) {
+  currentLayout = "Compact 360°";
 
   const positions = [];
+  const phase = random(0, Math.PI * 2);
 
-  const forward = new THREE.Vector3(0, 0, -1)
-    .applyQuaternion(headQuaternion);
-
-  forward.y = 0;
-
-  if (forward.lengthSq() < 0.0001) {
-    forward.set(0, 0, -1);
-  }
-
-  forward.normalize();
-
-  const right = new THREE.Vector3()
-    .crossVectors(
-      forward,
-      new THREE.Vector3(0, 1, 0)
+  const sectors = shuffle(
+    Array.from(
+      { length: requestedCount },
+      (_, index) => index
     )
-    .normalize();
-
-  const columns = Math.ceil(
-    Math.sqrt(requestedCount * 1.5)
   );
 
-  const rows = Math.ceil(requestedCount / columns);
+  for (const sector of sectors) {
+    const angle =
+      phase +
+      (sector + Math.random()) *
+        Math.PI * 2 / requestedCount;
 
-  const horizontalAngle = THREE.MathUtils.degToRad(
-    CONFIG.stationaryHorizontalAngle
-  );
-
-  for (let i = 0; i < requestedCount; i++) {
-    const row = Math.floor(i / columns);
-    const column = i % columns;
-
-    const countInRow = Math.min(
-      columns,
-      requestedCount - row * columns
+    const radius = Math.sqrt(
+      random(
+        CONFIG.compactMinimumRadius ** 2,
+        CONFIG.compactMaximumRadius ** 2
+      )
     );
 
-    const horizontalFraction = countInRow === 1
-      ? 0
-      : column / (countInRow - 1) - 0.5;
+    const position = new THREE.Vector3(
+      headPosition.x + Math.sin(angle) * radius,
+      headPosition.y + random(
+        CONFIG.minimumHeightOffset,
+        CONFIG.maximumHeightOffset
+      ),
+      headPosition.z + Math.cos(angle) * radius
+    );
 
-    const verticalFraction = rows === 1
-      ? 0
-      : 0.5 - row / (rows - 1);
-
-    const angle =
-      horizontalFraction * horizontalAngle +
-      random(-0.025, 0.025);
-
-    const radius =
-      CONFIG.stationaryDistance +
-      random(-0.035, 0.035);
-
-    const position = headPosition.clone()
-      .addScaledVector(
-        forward,
-        Math.cos(angle) * radius
-      )
-      .addScaledVector(
-        right,
-        Math.sin(angle) * radius
-      );
-
-    position.y =
-      headPosition.y +
-      verticalFraction * CONFIG.stationaryVerticalSpread +
-      random(-0.015, 0.015);
-
-    position.targetScale = CONFIG.stationaryTargetScale;
+    position.targetScale =
+      CONFIG.compactTargetScale * random(0.85, 1.1);
 
     positions.push(position);
   }
@@ -955,56 +893,51 @@ function generateStationaryPositions(requestedCount) {
 }
 
 // ============================================================
-// ADAPTIVE LARGE-AREA PLACEMENT
-// Enabled only when stationaryMode is false.
+// RANDOM ENVIRONMENT-ADAPTIVE PLACEMENT
+//
+// Samples the reported boundary at any size.
+// Targets become smaller in narrow/crowded areas.
+// Spacing is a preference only, never a placement requirement.
+//
+// If the player is near a boundary edge, distribution uses
+// available directions rather than forcing targets outside it.
 // ============================================================
 
 function generatePositions(requestedCount) {
-  if (
-    CONFIG.stationaryMode ||
-    boundary.length < 3
-  ) {
-    return generateStationaryPositions(requestedCount);
+  if (boundary.length < 3) {
+    return generateCompactPositions(requestedCount);
   }
 
   const size = getPlayAreaSize(boundary);
-
-  // These thresholds choose a layout; they never block entry.
-  if (
-    size.area < CONFIG.smallAreaThreshold ||
-    Math.min(size.width, size.depth) <
-      CONFIG.narrowAreaThreshold
-  ) {
-    return generateStationaryPositions(requestedCount);
-  }
-
-  const range = CONFIG.stingDistance - 0.8;
+  const placementRange = CONFIG.stingDistance - 0.8;
 
   const minX = Math.max(
     size.minX,
-    headPosition.x - range
+    headPosition.x - placementRange
   );
 
   const maxX = Math.min(
     size.maxX,
-    headPosition.x + range
+    headPosition.x + placementRange
   );
 
   const minZ = Math.max(
     size.minZ,
-    headPosition.z - range
+    headPosition.z - placementRange
   );
 
   const maxZ = Math.min(
     size.maxZ,
-    headPosition.z + range
+    headPosition.z + placementRange
   );
 
   if (minX >= maxX || minZ >= maxZ) {
-    return generateStationaryPositions(requestedCount);
+    return generateCompactPositions(requestedCount);
   }
 
   const candidates = [];
+  let totalSamples = 0;
+  let validSamples = 0;
 
   for (
     let attempt = 0;
@@ -1012,138 +945,183 @@ function generatePositions(requestedCount) {
     candidates.length < CONFIG.maximumPlacementCandidates;
     attempt++
   ) {
+    totalSamples++;
+
     const x = random(minX, maxX);
     const z = random(minZ, maxZ);
 
-    if (!pointInsidePolygon(x, z)) {
-      continue;
-    }
+    if (!pointInsidePolygon(x, z)) continue;
 
     const position = new THREE.Vector3(
       x,
-      headPosition.y + random(-0.4, 0.35),
+      headPosition.y + random(
+        CONFIG.minimumHeightOffset,
+        CONFIG.maximumHeightOffset
+      ),
       z
     );
 
-    const distance = position.distanceTo(headPosition);
-
-    if (distance > range || distance < 0.55) {
+    if (
+      position.distanceTo(headPosition) > placementRange
+    ) {
       continue;
     }
+
+    validSamples++;
 
     const clearance = boundaryClearance(position);
 
     if (
       !Number.isFinite(clearance) ||
-      clearance <= 0.000001
+      clearance <= Number.EPSILON
     ) {
       continue;
     }
 
     candidates.push({
       position,
-      clearance
+      clearance,
+      angle: Math.atan2(
+        x - headPosition.x,
+        z - headPosition.z
+      )
     });
   }
 
-  if (candidates.length < requestedCount) {
-    return generateStationaryPositions(requestedCount);
+  // Failed boundary sampling falls back rather than ending AR.
+  if (!candidates.length) {
+    return generateCompactPositions(requestedCount);
   }
 
-  const nearbyArea = Math.min(
+  const usableArea = Math.min(
     size.area,
-    (maxX - minX) * (maxZ - minZ)
+    (maxX - minX) * (maxZ - minZ) *
+      validSamples / Math.max(1, totalSamples)
   );
 
-  const preferredScale = THREE.MathUtils.clamp(
-    Math.sqrt(nearbyArea / requestedCount) * 0.7,
-    0.35,
-    CONFIG.maximumTargetScale
+  const preferredScale = Math.min(
+    CONFIG.maximumTargetScale,
+    Math.sqrt(usableArea / requestedCount) * 0.8,
+    Math.min(size.width, size.depth) * 0.55
   );
 
-  const desiredInset =
-    preferredScale * CONFIG.hostHorizontalRadius;
+  const phase = random(0, Math.PI * 2);
 
-  const roomyCandidates = candidates.filter(
-    (candidate) => candidate.clearance >= desiredInset
+  const sectors = shuffle(
+    Array.from(
+      { length: requestedCount },
+      (_, index) => index
+    )
   );
-
-  let pool;
-
-  if (roomyCandidates.length >= requestedCount) {
-    pool = roomyCandidates;
-  } else {
-    // Use the best available area without imposing a hard margin.
-    candidates.sort(
-      (a, b) => b.clearance - a.clearance
-    );
-
-    pool = candidates.slice(
-      0,
-      Math.max(
-        requestedCount,
-        Math.ceil(candidates.length * 0.6)
-      )
-    );
-  }
 
   const selected = [];
 
-  while (
-    selected.length < requestedCount &&
-    pool.length
-  ) {
-    let bestIndex = 0;
-    let bestScore = -Infinity;
+  for (const sector of sectors) {
+    if (!candidates.length) break;
 
-    for (let i = 0; i < pool.length; i++) {
-      const candidate = pool[i];
+    const desiredAngle =
+      phase +
+      (sector + Math.random()) *
+        Math.PI * 2 / requestedCount;
 
-      let spread = selected.length
-        ? Infinity
-        : Math.random();
+    const options = [];
+
+    for (let i = 0; i < candidates.length; i++) {
+      const candidate = candidates[i];
+
+      const directionMatch =
+        1 - angleDifference(
+          candidate.angle,
+          desiredAngle
+        ) / Math.PI;
+
+      const fit = THREE.MathUtils.clamp(
+        candidate.clearance /
+          Math.max(
+            preferredScale * CONFIG.hostHorizontalRadius,
+            Number.EPSILON
+          ),
+        0,
+        1
+      );
+
+      let nearestDistance = Infinity;
 
       for (const placed of selected) {
-        const horizontalDistance = Math.hypot(
-          candidate.position.x - placed.position.x,
-          candidate.position.z - placed.position.z
-        );
-
-        const spatialDistance =
-          candidate.position.distanceTo(placed.position);
-
-        spread = Math.min(
-          spread,
-          horizontalDistance * 0.75 +
-          spatialDistance * 0.25
+        nearestDistance = Math.min(
+          nearestDistance,
+          candidate.position.distanceTo(placed.position)
         );
       }
 
-      const score = (
-        spread +
-        Math.min(candidate.clearance, preferredScale) * 0.3
-      ) * random(0.9, 1.1);
+      const spread = selected.length
+        ? THREE.MathUtils.clamp(
+            nearestDistance /
+              Math.max(preferredScale * 1.5, 0.05),
+            0,
+            1
+          )
+        : Math.random();
 
-      if (score > bestScore) {
-        bestScore = score;
-        bestIndex = i;
-      }
+      // Soft preferences, not rigid placement rules.
+      const score =
+        directionMatch * 2 +
+        fit * 0.45 +
+        spread * 0.35 +
+        Math.random() * 0.4;
+
+      options.push({ index: i, score });
     }
 
-    selected.push(pool.splice(bestIndex, 1)[0]);
+    options.sort((a, b) => b.score - a.score);
+
+    // Random choice among good candidates avoids neat patterns.
+    const topCount = Math.min(12, options.length);
+    const chosen = options[
+      Math.floor(Math.random() * topCount)
+    ];
+
+    selected.push(
+      candidates.splice(chosen.index, 1)[0]
+    );
   }
 
-  if (selected.length < requestedCount) {
-    return generateStationaryPositions(requestedCount);
+  // Very unusual/tiny polygons may produce few sample points.
+  // Reuse sampled floor locations at different heights.
+  // Overlap is allowed; do not throw a space error.
+  const reusable = selected.slice();
+
+  while (selected.length < requestedCount) {
+    const source = reusable[
+      Math.floor(Math.random() * reusable.length)
+    ];
+
+    const position = source.position.clone();
+
+    position.y =
+      headPosition.y + random(
+        CONFIG.minimumHeightOffset,
+        CONFIG.maximumHeightOffset
+      );
+
+    selected.push({
+      position,
+      clearance: source.clearance,
+      angle: source.angle
+    });
   }
 
   const positions = selected.map((candidate) => {
     const position = candidate.position.clone();
 
-    position.targetScale = Math.min(
-      preferredScale,
+    const boundaryScale =
       candidate.clearance /
-        CONFIG.hostHorizontalRadius * 0.95
+        CONFIG.hostHorizontalRadius * 0.95;
+
+    position.targetScale = Math.min(
+      preferredScale * random(0.85, 1.1),
+      boundaryScale,
+      CONFIG.maximumTargetScale
     );
 
     return position;
@@ -1154,9 +1132,11 @@ function generatePositions(requestedCount) {
     0
   ) / positions.length;
 
-  currentLayout = averageScale >= 0.95
-    ? "Large area"
-    : "Adaptive area";
+  currentLayout = averageScale < 0.45
+    ? "Small-area 360°"
+    : averageScale < 0.95
+      ? "Adaptive 360°"
+      : "Large-area 360°";
 
   return positions;
 }
@@ -1299,7 +1279,7 @@ function createHost(position) {
   const host = new THREE.Group();
 
   const targetScale =
-    position.targetScale ?? CONFIG.stationaryTargetScale;
+    position.targetScale ?? CONFIG.compactTargetScale;
 
   host.scale.setScalar(targetScale);
 
@@ -1312,8 +1292,6 @@ function createHost(position) {
     .multiplyScalar(targetScale)
     .applyQuaternion(host.quaternion);
 
-  // The target patch, rather than the body centre,
-  // occupies the generated position.
   host.position.copy(position).sub(offset);
 
   const heat = heatMaterial();
@@ -1333,7 +1311,6 @@ function createHost(position) {
     mesh.scale.set(sx, sy, sz);
 
     host.add(mesh);
-
     return mesh;
   }
 
@@ -1459,7 +1436,6 @@ function createHost(position) {
   );
 
   scent.frustumCulled = false;
-
   host.add(scent);
 
   host.userData = {
@@ -1506,13 +1482,12 @@ function startRound() {
   roundNumber++;
   roundTotal = positions.length;
   roundCollected = 0;
-
   nextRoundAt = null;
 
   positions.forEach(createHost);
 
   say(
-    `Round ${roundNumber}: ${roundTotal} targets · ${currentLayout}`,
+    `Round ${roundNumber}: ${roundTotal} targets around you`,
     2.2
   );
 }
@@ -1521,6 +1496,7 @@ async function stopWithError(error) {
   if (stopping) return;
 
   stopping = true;
+  appReady = false;
   trackingAvailable = false;
 
   clearHosts();
@@ -1532,7 +1508,7 @@ async function stopWithError(error) {
     try {
       await currentSession.end();
     } catch {
-      // Preserve the original application error.
+      // Preserve the original error.
     }
   }
 
@@ -1542,15 +1518,15 @@ async function stopWithError(error) {
     "Application error: " + errorMessage(error);
 
   startButton.disabled = false;
-  startButton.textContent = "Try Sensory V13 again";
+  startButton.textContent = "Try Sensory V14 again";
 
   console.error(error);
 }
 
 function manualRound() {
   if (
-    !session ||
-    session.visibilityState !== "visible" ||
+    !appReady ||
+    session?.visibilityState !== "visible" ||
     !trackingAvailable ||
     needsRound ||
     stopping
@@ -1558,14 +1534,11 @@ function manualRound() {
     return;
   }
 
-  if (now - lastManualRound < 0.75) {
-    return;
-  }
+  if (now - lastManualRound < 0.75) return;
 
   lastManualRound = now;
 
   try {
-    // Also recentres compact targets around the current facing direction.
     startRound();
   } catch (error) {
     void stopWithError(error);
@@ -1598,7 +1571,6 @@ function updatePower() {
     bloodLevel = 0;
 
     resetAim();
-
     say("Power ended — collect blood to recharge.");
   }
 
@@ -1629,7 +1601,6 @@ function getHit(controller) {
   scene.updateMatrixWorld(true);
 
   rayOrigin.setFromMatrixPosition(controller.matrixWorld);
-
   rayRotation.extractRotation(controller.matrixWorld);
 
   rayDirection.set(0, 0, -1)
@@ -1637,12 +1608,10 @@ function getHit(controller) {
     .normalize();
 
   raycaster.set(rayOrigin, rayDirection);
-
   raycaster.near = 0;
   raycaster.far = CONFIG.stingDistance;
 
-  // Only target patches block the aiming ray.
-  // Overlapping host bodies do not block interaction.
+  // Host bodies do not obstruct the interaction ray.
   const patches = hosts
     .filter((host) =>
       !host.userData.collected && host.visible
@@ -1654,8 +1623,8 @@ function getHit(controller) {
 
 function sting(controller) {
   if (
-    !session ||
-    session.visibilityState !== "visible" ||
+    !appReady ||
+    session?.visibilityState !== "visible" ||
     !trackingAvailable ||
     needsRound ||
     nextRoundAt !== null ||
@@ -1686,13 +1655,11 @@ function sting(controller) {
 
   data.collected = true;
   data.collectedAt = now;
-
   data.ready = false;
   data.focus = 0;
 
   roundCollected++;
   totalStings++;
-
   proboscisUntil = now + 0.2;
 
   const activatedPower = addBlood();
@@ -1766,7 +1733,6 @@ for (let i = 0; i < 2; i++) {
     controller.userData.inputSource = null;
     controller.userData.host = null;
     controller.userData.aimTime = 0;
-
     dot.visible = false;
   });
 
@@ -1777,8 +1743,8 @@ for (let i = 0; i < 2; i++) {
 
   controller.addEventListener("squeezestart", () => {
     if (
-      !session ||
-      session.visibilityState !== "visible" ||
+      !appReady ||
+      session?.visibilityState !== "visible" ||
       stopping
     ) {
       return;
@@ -1831,15 +1797,12 @@ function updateAim(delta, canAim) {
 
   for (const controller of controllers) {
     const hit = getHit(controller);
-
     const host = hit?.object.userData.host || null;
     const data = controller.userData;
 
     data.dot.visible = Boolean(hit);
 
-    if (hit) {
-      data.dot.position.copy(hit.point);
-    }
+    if (hit) data.dot.position.copy(hit.point);
 
     if (data.host !== host) {
       data.host = host;
@@ -1895,13 +1858,12 @@ function animateHost(host) {
         (1 - age / 0.65) * 0.9;
     }
 
-    if (age >= 0.65) {
-      host.visible = false;
-    }
+    if (age >= 0.65) host.visible = false;
 
     return;
   }
 
+  // Targets remain world-fixed during the round.
   data.heat.uniforms.focus.value = data.focus;
   data.heat.uniforms.flash.value = 0;
 
@@ -1958,7 +1920,7 @@ function animateHost(host) {
 }
 
 // ============================================================
-// DIRECTION HINT
+// DIRECTION HINTS
 // ============================================================
 
 function nearestDirection() {
@@ -1982,9 +1944,7 @@ function nearestDirection() {
   leftAntenna.material.opacity = 0.25;
   rightAntenna.material.opacity = 0.25;
 
-  if (!nearest) {
-    return "Find the warm signatures";
-  }
+  if (!nearest) return "Find the warm signatures";
 
   nearest.userData.patch.getWorldPosition(temporary);
 
@@ -2004,16 +1964,11 @@ function nearestDirection() {
   }
 
   if (temporary.z > 0.15) {
-    return "Target behind you — R grip recentres the round";
+    return "Target behind you — turn only if comfortable";
   }
 
-  if (temporary.y > 0.35) {
-    return "Look slightly up";
-  }
-
-  if (temporary.y < -0.35) {
-    return "Look slightly down";
-  }
+  if (temporary.y > 0.35) return "Look slightly up";
+  if (temporary.y < -0.35) return "Look slightly down";
 
   if (temporary.x < -0.3) {
     return "Look left — follow the scent";
@@ -2027,7 +1982,7 @@ function nearestDirection() {
 }
 
 // ============================================================
-// TRACKING RESET AND SESSION CLEANUP
+// TRACKING RESET AND CLEANUP
 // ============================================================
 
 function onReferenceReset() {
@@ -2040,10 +1995,10 @@ function onReferenceReset() {
   needsRound = true;
   trackingAvailable = false;
 
-  say("Tracking reset — rebuilding targets in front of you.");
+  say("Tracking reset — rebuilding the layout.");
 }
 
-function clearBoundaryState() {
+function clearReferenceState() {
   referenceSpace?.removeEventListener(
     "reset",
     onReferenceReset
@@ -2053,14 +2008,12 @@ function clearBoundaryState() {
 
   boundary = [];
   boundarySignature = "";
+  currentLayout = "Compact 360°";
 
-  currentLayout = CONFIG.stationaryMode
-    ? "Stationary"
-    : "Compact";
-
-  nextBoundaryCheck = 0;
-  needsRound = false;
+  appReady = false;
   trackingAvailable = false;
+  needsRound = false;
+  nextBoundaryCheck = 0;
 }
 
 function resetGameState() {
@@ -2097,9 +2050,9 @@ startButton.addEventListener("click", async () => {
   startButton.textContent = "Starting AR…";
 
   clearHosts();
-  clearBoundaryState();
+  clearReferenceState();
 
-  // Audio preparation remains inside the button gesture.
+  // Prepare audio inside the user gesture.
   prepareAudio();
 
   let requestedSession = null;
@@ -2109,19 +2062,15 @@ startButton.addEventListener("click", async () => {
       throw new Error("WebXR is unavailable in this browser.");
     }
 
-    // Stationary mode requests no boundary feature at all.
-    const sessionOptions = CONFIG.stationaryMode
-      ? {}
-      : {
-          optionalFeatures: [
-            "bounded-floor",
-            "local-floor"
-          ]
-        };
-
     requestedSession = await navigator.xr.requestSession(
       "immersive-ar",
-      sessionOptions
+      {
+        // Neither floor nor boundary support is mandatory.
+        optionalFeatures: [
+          "bounded-floor",
+          "local-floor"
+        ]
+      }
     );
 
     session = requestedSession;
@@ -2143,7 +2092,7 @@ startButton.addEventListener("click", async () => {
       if (session !== requestedSession) return;
 
       clearHosts();
-      clearBoundaryState();
+      clearReferenceState();
 
       session = null;
       nextRoundAt = null;
@@ -2152,24 +2101,23 @@ startButton.addEventListener("click", async () => {
       silenceAudio();
 
       panel.style.display = "";
-
       startButton.disabled = false;
-      startButton.textContent = "Enter Sensory V13";
+      startButton.textContent = "Enter Sensory V14";
 
       if (!stopping) {
         statusText.textContent =
-          "Session ended. Targets will be rebuilt on entry.";
+          "Session ended. A fresh random layout will be generated on entry.";
       }
     });
-
-    const referenceTypes = CONFIG.stationaryMode
-      ? ["local"]
-      : ["bounded-floor", "local-floor", "local"];
 
     let chosenReferenceSpace = null;
     let chosenReferenceType = "local";
 
-    for (const type of referenceTypes) {
+    for (const type of [
+      "bounded-floor",
+      "local-floor",
+      "local"
+    ]) {
       try {
         chosenReferenceSpace =
           await requestedSession.requestReferenceSpace(type);
@@ -2177,7 +2125,7 @@ startButton.addEventListener("click", async () => {
         chosenReferenceType = type;
         break;
       } catch {
-        // Optional tracking space unavailable: try the next.
+        // Continue with the next available tracking space.
       }
     }
 
@@ -2190,12 +2138,10 @@ startButton.addEventListener("click", async () => {
     await renderer.xr.setSession(requestedSession);
 
     if (session !== requestedSession) {
-      throw new Error("The XR session ended during startup.");
+      throw new Error("XR ended during startup.");
     }
 
-    // Rendering and controller placement share this space.
     renderer.xr.setReferenceSpace(chosenReferenceSpace);
-
     referenceSpace = chosenReferenceSpace;
 
     referenceSpace.addEventListener(
@@ -2208,12 +2154,13 @@ startButton.addEventListener("click", async () => {
 
     needsRound = true;
     nextBoundaryCheck = 0;
+    appReady = true;
 
     panel.style.display = "none";
-
     updateAudio();
   } catch (error) {
     stopping = true;
+    appReady = false;
     trackingAvailable = false;
 
     silenceAudio();
@@ -2229,12 +2176,11 @@ startButton.addEventListener("click", async () => {
     session = null;
 
     clearHosts();
-    clearBoundaryState();
+    clearReferenceState();
 
     panel.style.display = "";
-
     startButton.disabled = false;
-    startButton.textContent = "Try Sensory V13 again";
+    startButton.textContent = "Try Sensory V14 again";
 
     statusText.textContent =
       "AR could not start: " + errorMessage(error);
@@ -2263,6 +2209,7 @@ renderer.setAnimationLoop((milliseconds, frame) => {
   trackingAvailable = false;
 
   if (
+    appReady &&
     frame &&
     referenceSpace &&
     session?.visibilityState === "visible" &&
@@ -2280,10 +2227,7 @@ renderer.setAnimationLoop((milliseconds, frame) => {
         headPosition.set(p.x, p.y, p.z);
         headQuaternion.set(q.x, q.y, q.z, q.w);
 
-        if (
-          !CONFIG.stationaryMode &&
-          now >= nextBoundaryCheck
-        ) {
+        if (now >= nextBoundaryCheck) {
           const previousSignature = boundarySignature;
           const currentSignature = readBoundary();
 
@@ -2291,7 +2235,6 @@ renderer.setAnimationLoop((milliseconds, frame) => {
 
           if (previousSignature !== currentSignature) {
             clearHosts();
-
             nextRoundAt = null;
             needsRound = true;
           }
@@ -2318,7 +2261,8 @@ renderer.setAnimationLoop((milliseconds, frame) => {
 
   updateAim(
     delta,
-    trackingAvailable &&
+    appReady &&
+      trackingAvailable &&
       !needsRound &&
       nextRoundAt === null &&
       !stopping
@@ -2333,7 +2277,7 @@ renderer.setAnimationLoop((milliseconds, frame) => {
   let message = nearestDirection();
 
   if (!session) {
-    message = "Enter AR to start compact targets";
+    message = "Enter AR to start random 360° targets";
   } else if (!trackingAvailable) {
     message = "Waiting for headset tracking";
   } else if (nextRoundAt !== null) {
@@ -2358,7 +2302,6 @@ renderer.setAnimationLoop((milliseconds, frame) => {
     now < proboscisUntil ? 1.35 : 1;
 
   drawHUD(message);
-
   renderer.render(scene, camera);
 });
 
@@ -2420,18 +2363,14 @@ async function checkSupport() {
     }
 
     startButton.disabled = false;
-    startButton.textContent = "Enter Sensory V13";
+    startButton.textContent = "Enter Sensory V14";
 
-    statusText.textContent = CONFIG.stationaryMode
-      ? (
-          "Stationary mode: 5–20 small targets in front of you. " +
-          "No minimum-space check. " +
-          "Left grip: sound. Right grip: rebuild/recentre targets."
-        )
-      : (
-          "Adaptive mode: compact targets in small or unknown areas, " +
-          "larger scattered targets when a suitable boundary is available."
-        );
+    statusText.textContent =
+      "5–20 random targets around you. " +
+      "Smaller targets in smaller reported play areas. " +
+      "No boundary? Compact 360° layout. " +
+      "Left grip: sound. Right grip: reshuffle. " +
+      "Turn only where comfortable and safe.";
   } catch (error) {
     statusText.textContent =
       "Support check failed: " + errorMessage(error);
@@ -2440,4 +2379,4 @@ async function checkSupport() {
 
 await checkSupport();
 
-// END OF MOSQUITO SENSORY V13
+// END OF MOSQUITO SENSORY V14
