@@ -2,40 +2,45 @@ import * as THREE from
   "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js";
 
 // ============================================================
-// MOSQUITO SENSORY V10
+// MOSQUITO SENSORY V11
 //
-// - 5–20 targets per round.
-// - Targets inside the WebXR-reported bounded play area.
-// - Purple/magenta/orange/yellow sensory overlay.
-// - Synthesised mosquito background buzz.
+// 5–20 stationary, spread-out targets.
+// Fresh browser-provided bounded-floor data on every AR entry.
+// Blood charging and automatic power-up.
+// Procedural mosquito background sound.
 //
-// IMPORTANT:
-// This does not directly access Meta Guardian.
-// No targets are generated without valid bounded-floor data.
-// Bounds describe a floor area, not furniture or ceiling height.
+// No actual thermal sensing or real-person detection.
+// No stored boundary and no guessed boundary fallback.
+// Does not reset Meta Guardian or detect physical obstacles.
 // ============================================================
 
 const CONFIG = {
-  version: "SENSORY V10",
+  version: "SENSORY V11",
+
   minimumTargets: 5,
   maximumTargets: 20,
 
-  // All target footprints stay this far inside the polygon.
   boundaryMargin: 0.65,
 
-  // Avoid placing target patches immediately against your head.
-  minimumHeadDistance: 0.5,
+  // Minimum spacing between target patches.
+  minimumTargetSpacing: 0.8,
 
+  // Also prevent vertical stacks at almost the same floor position.
+  minimumHorizontalSpacing: 0.45,
+
+  minimumHeadDistance: 0.65,
   minimumHeightOffset: -0.85,
   maximumHeightOffset: 0.65,
 
   stingDistance: 8,
   acquisitionSeconds: 0.3,
+  poweredAcquisitionSeconds: 0.12,
+
+  bloodPerHit: 10,
+  powerSeconds: 8,
   nextRoundDelay: 1.8,
 
-  environmentParticles: 100,
   scentParticles: 18,
-
   filterOpacity: 0.85,
   buzzVolume: 0.018
 };
@@ -48,6 +53,10 @@ const COLOR = {
   yellow: 0xffeb70
 };
 
+// ============================================================
+// PAGE ELEMENTS
+// ============================================================
+
 const startButton = document.getElementById("start");
 const statusText = document.getElementById("status");
 const panel = document.getElementById("panel");
@@ -59,8 +68,8 @@ if (!startButton || !statusText || !panel) {
 }
 
 startButton.disabled = true;
-startButton.textContent = "Loading Sensory V10…";
-statusText.textContent = "Preparing boundary-aware target rounds.";
+startButton.textContent = "Loading Sensory V11…";
+statusText.textContent = "Boundary will be checked when you enter AR.";
 
 // ============================================================
 // SCENE
@@ -75,7 +84,7 @@ const camera = new THREE.PerspectiveCamera(
   30
 );
 
-camera.position.set(0, 1.6, 0);
+// Keep the XR scene origin unchanged.
 scene.add(camera);
 
 const renderer = new THREE.WebGLRenderer({
@@ -87,20 +96,19 @@ renderer.setSize(innerWidth, innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
 renderer.setClearColor(0x000000, 0);
 
-// Boundary and targets must use the same reference space.
 renderer.xr.enabled = true;
 renderer.xr.setReferenceSpaceType("bounded-floor");
 
 document.body.appendChild(renderer.domElement);
 
 // ============================================================
-// STATE
+// STATE — MEMORY ONLY, NO SAVED BOUNDARY
 // ============================================================
 
 const hosts = [];
 const controllers = [];
 
-const headPosition = new THREE.Vector3(0, 1.6, 0);
+const headPosition = new THREE.Vector3();
 const headQuaternion = new THREE.Quaternion();
 
 const raycaster = new THREE.Raycaster();
@@ -117,14 +125,20 @@ const HOST_SCALE = 0.8;
 let session = null;
 let referenceSpace = null;
 let boundary = [];
+let boundarySignature = "";
 
+let starting = false;
+let stopping = false;
 let needsRound = false;
-let endingForError = false;
+let nextBoundaryCheck = 0;
 
 let roundNumber = 0;
 let roundTotal = 0;
 let roundCollected = 0;
 let totalStings = 0;
+
+let bloodLevel = 0;
+let powerUntil = 0;
 
 let now = 0;
 let previousTime = null;
@@ -146,6 +160,16 @@ function random(minimum, maximum) {
 
 function randomInteger(minimum, maximum) {
   return Math.floor(random(minimum, maximum + 1));
+}
+
+function isPowered() {
+  return powerUntil > now;
+}
+
+function acquisitionTime() {
+  return isPowered()
+    ? CONFIG.poweredAcquisitionSeconds
+    : CONFIG.acquisitionSeconds;
 }
 
 function say(message, duration = 1.5) {
@@ -197,9 +221,8 @@ const particleTexture = canvasTexture(64, 64, (context) => {
 });
 
 // ============================================================
-// MOSQUITO BUZZ
-// Procedural sound, not a recording.
-// Starts from the user's Enter button click.
+// MOSQUITO AUDIO
+// Synthesised sound; no external audio file.
 // ============================================================
 
 let audioContext = null;
@@ -208,8 +231,6 @@ let soundEnabled = true;
 let audioAvailable = true;
 
 function prepareAudio() {
-  if (!audioAvailable) return;
-
   try {
     if (!audioContext) {
       const AudioContextClass =
@@ -228,8 +249,7 @@ function prepareAudio() {
 
       const lowPass = audioContext.createBiquadFilter();
       lowPass.type = "lowpass";
-      lowPass.frequency.value = 2400;
-      lowPass.Q.value = 0.6;
+      lowPass.frequency.value = 2200;
       lowPass.connect(audioMaster);
 
       const highPass = audioContext.createBiquadFilter();
@@ -248,10 +268,10 @@ function prepareAudio() {
 
       const secondGain = audioContext.createGain();
       secondGain.gain.value = 0.35;
+
       oscillatorB.connect(secondGain);
       secondGain.connect(highPass);
 
-      // Slow pitch variation gives the buzz a hovering quality.
       const pitchLFO = audioContext.createOscillator();
       pitchLFO.frequency.value = 0.7;
 
@@ -267,13 +287,14 @@ function prepareAudio() {
       pitchLFO.start();
     }
 
-    // Do not await this before requesting the XR session.
+    audioAvailable = true;
+
     audioContext.resume().catch(() => {
       audioAvailable = false;
     });
   } catch (error) {
     audioAvailable = false;
-    console.warn("Mosquito audio unavailable:", error);
+    console.warn("Audio unavailable:", error);
   }
 }
 
@@ -285,7 +306,7 @@ function updateAudio() {
     session.visibilityState === "visible" &&
     soundEnabled &&
     audioAvailable &&
-    !endingForError;
+    !stopping;
 
   audioMaster.gain.setTargetAtTime(
     audible ? CONFIG.buzzVolume : 0,
@@ -313,7 +334,7 @@ function toggleSound() {
 
   say(
     !audioAvailable
-      ? "Audio unavailable in this browser"
+      ? "Audio unavailable"
       : soundEnabled
         ? "Mosquito sound on"
         : "Mosquito sound off"
@@ -322,7 +343,7 @@ function toggleSound() {
 
 // ============================================================
 // MULTICOLOUR VIEW FILTER
-// Artistic overlay; does not sample passthrough pixels.
+// Artistic overlay, not passthrough-image processing.
 // ============================================================
 
 const filterTexture = canvasTexture(1024, 1024, (context) => {
@@ -352,8 +373,10 @@ const filterTexture = canvasTexture(1024, 1024, (context) => {
   glow(270, 460, 530, 255, 10, 155, 0.38);
   glow(770, 390, 510, 230, 10, 180, 0.34);
   glow(510, 200, 520, 115, 10, 220, 0.26);
+
   glow(270, 790, 330, 255, 100, 0, 0.32);
   glow(770, 790, 330, 255, 125, 0, 0.32);
+
   glow(300, 900, 210, 255, 230, 35, 0.24);
   glow(730, 900, 210, 255, 230, 35, 0.24);
 });
@@ -451,6 +474,7 @@ function headLine(points, color) {
   line.renderOrder = 110;
   line.frustumCulled = false;
   camera.add(line);
+
   return line;
 }
 
@@ -472,12 +496,12 @@ const proboscis = headLine([
 ], COLOR.yellow);
 
 // ============================================================
-// HUD
+// HUD WITH BLOOD BAR AND POWER TIMER
 // ============================================================
 
 const hudCanvas = document.createElement("canvas");
 hudCanvas.width = 1024;
-hudCanvas.height = 300;
+hudCanvas.height = 360;
 
 const hudContext = hudCanvas.getContext("2d");
 
@@ -487,7 +511,7 @@ const hudTexture = new THREE.CanvasTexture(hudCanvas);
 hudTexture.colorSpace = THREE.SRGBColorSpace;
 
 const hud = new THREE.Mesh(
-  new THREE.PlaneGeometry(0.9, 0.264),
+  new THREE.PlaneGeometry(0.9, 0.316),
   new THREE.MeshBasicMaterial({
     map: hudTexture,
     transparent: true,
@@ -497,64 +521,120 @@ const hud = new THREE.Mesh(
   })
 );
 
-hud.position.set(0, -0.32, -1);
+hud.position.set(0, -0.34, -1);
 hud.renderOrder = 120;
 hud.frustumCulled = false;
 camera.add(hud);
 
 function drawHUD(message) {
+  const powerRemaining = Math.max(0, powerUntil - now);
+  const powerDisplay = Math.ceil(powerRemaining * 10) / 10;
+
   const key = [
-    roundNumber, roundTotal, roundCollected,
-    totalStings, soundEnabled, message
+    roundNumber,
+    roundTotal,
+    roundCollected,
+    totalStings,
+    bloodLevel,
+    powerDisplay,
+    message
   ].join("|");
 
   if (key === lastHUDKey) return;
   lastHUDKey = key;
 
-  hudContext.clearRect(0, 0, 1024, 300);
-  hudContext.fillStyle = "rgba(40,4,65,0.82)";
-  hudContext.fillRect(0, 0, 1024, 300);
-  hudContext.textAlign = "center";
+  hudContext.clearRect(0, 0, 1024, 360);
 
+  hudContext.fillStyle = "rgba(40,4,65,0.84)";
+  hudContext.fillRect(0, 0, 1024, 360);
+
+  hudContext.textAlign = "center";
   hudContext.fillStyle = "#FFD6F2";
-  hudContext.font = "25px sans-serif";
-  hudContext.fillText(CONFIG.version, 512, 38);
+  hudContext.font = "24px sans-serif";
+  hudContext.fillText(CONFIG.version, 512, 34);
 
   hudContext.fillStyle = "#FFEB70";
-  hudContext.font = "bold 44px sans-serif";
+  hudContext.font = "bold 42px sans-serif";
   hudContext.fillText(
     `ROUND ${roundNumber} · ${roundCollected}/${roundTotal}`,
-    512, 96
+    512,
+    87
   );
 
   hudContext.fillStyle = "#FFD6F2";
-  hudContext.font = "27px sans-serif";
-  hudContext.fillText(message, 512, 150);
+  hudContext.font = "26px sans-serif";
+  hudContext.fillText(message, 512, 132);
 
   hudContext.font = "22px sans-serif";
   hudContext.fillText(
-    `Total: ${totalStings} · L grip: sound · R grip: new round`,
-    512, 198
+    `Hits: ${totalStings} · L grip: sound · R grip: new round`,
+    512,
+    171
   );
 
-  const progress = roundTotal ? roundCollected / roundTotal : 0;
+  hudContext.textAlign = "left";
+  hudContext.fillStyle = isPowered() ? "#FFEB70" : "#FF7D9D";
+  hudContext.font = "bold 25px sans-serif";
 
-  hudContext.fillStyle = "#66205F";
-  hudContext.fillRect(160, 242, 704, 17);
+  hudContext.fillText(
+    isPowered()
+      ? `BLOOD 100% · POWER-UP ${powerDisplay.toFixed(1)}s`
+      : `BLOOD ${bloodLevel}% · Charge to 100%`,
+    150,
+    215
+  );
 
-  const gradient = hudContext.createLinearGradient(160, 0, 864, 0);
-  gradient.addColorStop(0, "#FF1493");
-  gradient.addColorStop(0.5, "#FF8500");
-  gradient.addColorStop(1, "#FFEB70");
+  hudContext.fillStyle = "#44152C";
+  hudContext.fillRect(150, 230, 724, 27);
 
-  hudContext.fillStyle = gradient;
-  hudContext.fillRect(160, 242, 704 * progress, 17);
+  const bloodGradient = hudContext.createLinearGradient(
+    150, 0, 874, 0
+  );
+
+  bloodGradient.addColorStop(0, "#B80035");
+  bloodGradient.addColorStop(0.5, "#FF2455");
+  bloodGradient.addColorStop(1, isPowered() ? "#FFEB70" : "#FF8500");
+
+  hudContext.fillStyle = bloodGradient;
+  hudContext.fillRect(
+    150, 230,
+    724 * bloodLevel / 100,
+    27
+  );
+
+  hudContext.strokeStyle = isPowered() ? "#FFEB70" : "#FF5A87";
+  hudContext.lineWidth = 2;
+  hudContext.strokeRect(150, 230, 724, 27);
+
+  hudContext.fillStyle = "#57225E";
+  hudContext.fillRect(150, 279, 724, 12);
+
+  hudContext.fillStyle = isPowered() ? "#FFEB70" : "#FF8500";
+
+  const lowerBar = isPowered()
+    ? powerRemaining / CONFIG.powerSeconds
+    : roundTotal
+      ? roundCollected / roundTotal
+      : 0;
+
+  hudContext.fillRect(150, 279, 724 * lowerBar, 12);
+
+  hudContext.textAlign = "center";
+  hudContext.fillStyle = "#FFD6F2";
+  hudContext.font = "20px sans-serif";
+  hudContext.fillText(
+    isPowered()
+      ? "POWER ACTIVE: faster target acquisition"
+      : "Each successful hit adds 10% blood",
+    512,
+    327
+  );
+
   hudTexture.needsUpdate = true;
 }
 
 // ============================================================
-// BOUNDARY GEOMETRY
-// All positions use the renderer's bounded-floor coordinates.
+// FRESH BOUNDARY READING
 // ============================================================
 
 function readBoundary() {
@@ -563,7 +643,7 @@ function readBoundary() {
   if (!points || points.length < 3) {
     throw new Error(
       "The browser did not provide a play-area boundary. " +
-      "Targets were not generated."
+      "No targets were generated."
     );
   }
 
@@ -572,8 +652,8 @@ function readBoundary() {
     z: point.z
   }));
 
-  if (polygon.some((p) =>
-    !Number.isFinite(p.x) || !Number.isFinite(p.z)
+  if (polygon.some((point) =>
+    !Number.isFinite(point.x) || !Number.isFinite(point.z)
   )) {
     throw new Error("Invalid play-area boundary.");
   }
@@ -591,6 +671,12 @@ function readBoundary() {
   }
 
   boundary = polygon;
+
+  boundarySignature = polygon.map((point) =>
+    `${point.x.toFixed(3)},${point.z.toFixed(3)}`
+  ).join(";");
+
+  return boundarySignature;
 }
 
 function pointInsidePolygon(x, z) {
@@ -624,7 +710,8 @@ function distanceToSegment(x, z, a, b) {
     ? 0
     : THREE.MathUtils.clamp(
         ((x - a.x) * dx + (z - a.z) * dz) / lengthSquared,
-        0, 1
+        0,
+        1
       );
 
   return Math.hypot(
@@ -633,13 +720,14 @@ function distanceToSegment(x, z, a, b) {
   );
 }
 
-function safelyInside(x, z) {
+function insideWithMargin(x, z) {
   if (!pointInsidePolygon(x, z)) return false;
 
   for (let i = 0; i < boundary.length; i++) {
     if (
       distanceToSegment(
-        x, z,
+        x,
+        z,
         boundary[i],
         boundary[(i + 1) % boundary.length]
       ) < CONFIG.boundaryMargin
@@ -651,7 +739,12 @@ function safelyInside(x, z) {
   return true;
 }
 
-function generatePositions(count) {
+// ============================================================
+// SPREAD-OUT RANDOM PLACEMENT
+// Does not relax the spacing or boundary rules.
+// ============================================================
+
+function generatePositions(requestedCount) {
   const xs = boundary.map((point) => point.x);
   const zs = boundary.map((point) => point.z);
 
@@ -662,16 +755,15 @@ function generatePositions(count) {
 
   const candidates = [];
 
-  // Build a pool strictly inside the boundary.
   for (
     let attempt = 0;
-    attempt < 40000 && candidates.length < 240;
+    attempt < 50000 && candidates.length < 1600;
     attempt++
   ) {
     const x = random(minimumX, maximumX);
     const z = random(minimumZ, maximumZ);
 
-    if (!safelyInside(x, z)) continue;
+    if (!insideWithMargin(x, z)) continue;
 
     const y = Math.max(
       0.65,
@@ -694,41 +786,87 @@ function generatePositions(count) {
     candidates.push(position);
   }
 
-  if (candidates.length < count) {
+  if (candidates.length < CONFIG.minimumTargets) {
     throw new Error(
-      "Not enough usable space inside the reported boundary " +
-      "with the 0.65 m inward margin. Targets were not generated."
+      "Not enough usable space inside the boundary. " +
+      "At least five separated targets are required."
     );
   }
 
-  // Prefer separated patches, but permit close targets.
-  // Never relax the boundary requirement.
-  const selected = [];
+  let bestSelection = [];
 
-  while (selected.length < count) {
-    let chosenIndex = Math.floor(Math.random() * candidates.length);
+  // Multiple random starts reduce the chance of a poor layout.
+  for (let layoutAttempt = 0; layoutAttempt < 6; layoutAttempt++) {
+    const selected = [
+      candidates[Math.floor(Math.random() * candidates.length)]
+    ];
 
-    for (let attempt = 0; attempt < 30; attempt++) {
-      const index = Math.floor(Math.random() * candidates.length);
+    while (selected.length < requestedCount) {
+      const options = [];
 
-      if (
-        selected.every((position) =>
-          position.distanceTo(candidates[index]) >= 0.4
-        )
-      ) {
-        chosenIndex = index;
-        break;
+      for (const candidate of candidates) {
+        let nearestDistance = Infinity;
+        let valid = true;
+
+        for (const placed of selected) {
+          const distance = candidate.distanceTo(placed);
+
+          const horizontalDistance = Math.hypot(
+            candidate.x - placed.x,
+            candidate.z - placed.z
+          );
+
+          if (
+            distance < CONFIG.minimumTargetSpacing ||
+            horizontalDistance < CONFIG.minimumHorizontalSpacing
+          ) {
+            valid = false;
+            break;
+          }
+
+          nearestDistance = Math.min(nearestDistance, distance);
+        }
+
+        if (!valid) continue;
+
+        options.push({
+          position: candidate,
+          score: nearestDistance
+        });
       }
+
+      if (options.length === 0) break;
+
+      // Prefer widely separated candidates, with random selection
+      // among the best few so each round still differs.
+      options.sort((a, b) => b.score - a.score);
+
+      const topCount = Math.min(8, options.length);
+      const chosen = options[Math.floor(Math.random() * topCount)];
+
+      selected.push(chosen.position);
     }
 
-    selected.push(candidates.splice(chosenIndex, 1)[0]);
+    if (selected.length > bestSelection.length) {
+      bestSelection = selected;
+    }
+
+    if (bestSelection.length === requestedCount) break;
   }
 
-  return selected;
+  if (bestSelection.length < CONFIG.minimumTargets) {
+    throw new Error(
+      "The usable area could not fit five targets with " +
+      "the required spacing and inward boundary margin. " +
+      "No crowded layout was generated."
+    );
+  }
+
+  return bestSelection.map((position) => position.clone());
 }
 
 // ============================================================
-// HOT HOST MATERIAL
+// HOT SIGNATURE MATERIAL
 // ============================================================
 
 function heatMaterial() {
@@ -736,7 +874,8 @@ function heatMaterial() {
     uniforms: {
       time: { value: 0 },
       focus: { value: 0 },
-      flash: { value: 0 }
+      flash: { value: 0 },
+      power: { value: 0 }
     },
 
     vertexShader: `
@@ -756,6 +895,7 @@ function heatMaterial() {
       uniform float time;
       uniform float focus;
       uniform float flash;
+      uniform float power;
 
       varying vec3 n;
       varying vec3 p;
@@ -765,7 +905,8 @@ function heatMaterial() {
 
         heat = clamp(
           heat + 0.035 * sin(p.y * 24.0 - time * 1.8),
-          0.0, 1.0
+          0.0,
+          1.0
         );
 
         vec3 purple = vec3(0.41, 0.03, 0.72);
@@ -787,9 +928,11 @@ function heatMaterial() {
         );
 
         color = mix(color, yellow, flash * 0.8);
+        color = mix(color, yellow, power * 0.12);
 
         gl_FragColor = vec4(
-          color, 0.25 + heat * 0.23 + focus * 0.08
+          color,
+          0.25 + heat * 0.23 + focus * 0.08
         );
 
         #include <colorspace_fragment>
@@ -803,7 +946,7 @@ function heatMaterial() {
 }
 
 // ============================================================
-// TARGETS
+// HOST CREATION AND CLEANUP
 // ============================================================
 
 function resetAim() {
@@ -869,23 +1012,27 @@ function createHost(position) {
 
   addPart(
     new THREE.CapsuleGeometry(0.23, 0.48, 4, 12),
-    0, 0, 0, 1, 1, 0.65
+    0, 0, 0,
+    1, 1, 0.65
   );
 
   addPart(
     new THREE.SphereGeometry(0.14, 12, 10),
-    0, 0.64, 0, 0.88, 1.05, 0.85
+    0, 0.64, 0,
+    0.88, 1.05, 0.85
   );
 
   addPart(
     new THREE.SphereGeometry(1, 12, 8),
-    0, 0.3, 0, 0.32, 0.1, 0.15
+    0, 0.3, 0,
+    0.32, 0.1, 0.15
   );
 
   for (const side of [-1, 1]) {
     const arm = addPart(
       new THREE.CapsuleGeometry(0.06, 0.35, 3, 8),
-      side * 0.29, 0.015, 0, 1, 1, 0.8
+      side * 0.29, 0.015, 0,
+      1, 1, 0.8
     );
 
     arm.rotation.z = side * 0.15;
@@ -957,6 +1104,7 @@ function createHost(position) {
   );
 
   const scentGeometry = new THREE.BufferGeometry();
+
   scentGeometry.setAttribute(
     "position",
     new THREE.BufferAttribute(scentPositions, 3)
@@ -979,8 +1127,15 @@ function createHost(position) {
   host.add(scent);
 
   host.userData = {
-    heat, patch, core, segments, closedRing, ripple,
-    scent, scentPositions,
+    heat,
+    patch,
+    core,
+    segments,
+    closedRing,
+    ripple,
+    scent,
+    scentPositions,
+
     focus: 0,
     aimed: false,
     ready: false,
@@ -994,91 +1149,41 @@ function createHost(position) {
 }
 
 // ============================================================
-// BOUNDARY-CONTAINED ATMOSPHERE
-// ============================================================
-
-const atmospherePositions = new Float32Array(
-  CONFIG.environmentParticles * 3
-);
-
-const atmosphereGeometry = new THREE.BufferGeometry();
-
-atmosphereGeometry.setAttribute(
-  "position",
-  new THREE.BufferAttribute(atmospherePositions, 3)
-);
-
-const atmosphere = new THREE.Points(
-  atmosphereGeometry,
-  new THREE.PointsMaterial({
-    color: COLOR.violet,
-    map: particleTexture,
-    size: 0.035,
-    opacity: 0.42,
-    transparent: true,
-    depthWrite: false,
-    toneMapped: false
-  })
-);
-
-atmosphere.visible = false;
-atmosphere.frustumCulled = false;
-scene.add(atmosphere);
-
-let atmosphereSeeds = [];
-
-function seedAtmosphere(positions) {
-  atmosphereSeeds = [];
-
-  for (let i = 0; i < CONFIG.environmentParticles; i++) {
-    const position = positions[i % positions.length];
-
-    atmosphereSeeds.push({
-      x: position.x,
-      z: position.z,
-      y: random(0.4, Math.max(1.2, headPosition.y + 0.5)),
-      phase: random(0, Math.PI * 2)
-    });
-  }
-
-  atmosphere.visible = true;
-}
-
-// ============================================================
-// ROUND MANAGEMENT
+// ROUNDS
 // ============================================================
 
 function startRound() {
-  // Re-read in case the runtime updated the reference space.
   readBoundary();
 
-  const count = randomInteger(
+  const requestedCount = randomInteger(
     CONFIG.minimumTargets,
     CONFIG.maximumTargets
   );
 
-  // Validate placement before replacing the current round.
-  const positions = generatePositions(count);
+  const positions = generatePositions(requestedCount);
 
   clearHosts();
 
   roundNumber++;
-  roundTotal = count;
+  roundTotal = positions.length;
   roundCollected = 0;
   nextRoundAt = null;
 
   positions.forEach(createHost);
-  seedAtmosphere(positions);
 
-  say(`Round ${roundNumber}: find ${count} targets!`, 2);
+  say(
+    positions.length < requestedCount
+      ? `Round ${roundNumber}: ${positions.length} targets fit with spacing`
+      : `Round ${roundNumber}: find ${positions.length} targets!`,
+    2.2
+  );
 }
 
 async function stopWithError(error) {
-  if (endingForError) return;
-  endingForError = true;
+  if (stopping) return;
+  stopping = true;
 
   clearHosts();
-  atmosphere.visible = false;
   silenceAudio();
 
   const currentSession = session;
@@ -1087,18 +1192,18 @@ async function stopWithError(error) {
     try {
       await currentSession.end();
     } catch {
-      // Still show the original boundary/placement problem.
+      // Keep the original error.
     }
   }
 
   panel.style.display = "";
   statusText.textContent = error.message;
   startButton.disabled = false;
-  startButton.textContent = "Try Sensory V10 again";
+  startButton.textContent = "Try Sensory V11 again";
 }
 
 function manualRound() {
-  if (!session || needsRound || endingForError) return;
+  if (!session || needsRound || stopping) return;
   if (now - lastManualRound < 0.75) return;
 
   lastManualRound = now;
@@ -1111,14 +1216,55 @@ function manualRound() {
 }
 
 // ============================================================
-// AIMING AND STINGING
+// BLOOD AND POWER-UP
+// ============================================================
+
+function addBlood() {
+  if (isPowered()) return false;
+
+  bloodLevel = Math.min(
+    100,
+    bloodLevel + CONFIG.bloodPerHit
+  );
+
+  if (bloodLevel === 100) {
+    powerUntil = now + CONFIG.powerSeconds;
+    return true;
+  }
+
+  return false;
+}
+
+function updatePower() {
+  if (powerUntil > 0 && now >= powerUntil) {
+    powerUntil = 0;
+    bloodLevel = 0;
+    resetAim();
+    say("Power ended — collect blood to recharge.");
+  }
+
+  const antennaColor = isPowered()
+    ? COLOR.yellow
+    : COLOR.magenta;
+
+  leftAntenna.material.color.setHex(antennaColor);
+  rightAntenna.material.color.setHex(antennaColor);
+  proboscis.material.color.setHex(
+    isPowered() ? COLOR.orange : COLOR.yellow
+  );
+}
+
+// ============================================================
+// CONTROLLER AIMING
 // ============================================================
 
 function getHit(controller) {
   if (
     !controller.visible ||
     !controller.userData.inputSource
-  ) return null;
+  ) {
+    return null;
+  }
 
   scene.updateMatrixWorld(true);
 
@@ -1130,6 +1276,7 @@ function getHit(controller) {
     .normalize();
 
   raycaster.set(rayOrigin, rayDirection);
+  raycaster.near = 0;
   raycaster.far = CONFIG.stingDistance;
 
   const patches = hosts
@@ -1140,7 +1287,15 @@ function getHit(controller) {
 }
 
 function sting(controller) {
-  if (!session || nextRoundAt !== null || endingForError) return;
+  if (
+    !session ||
+    session.visibilityState !== "visible" ||
+    needsRound ||
+    nextRoundAt !== null ||
+    stopping
+  ) {
+    return;
+  }
 
   const hit = getHit(controller);
 
@@ -1154,7 +1309,7 @@ function sting(controller) {
 
   if (
     controller.userData.host !== host ||
-    controller.userData.aimTime < CONFIG.acquisitionSeconds
+    controller.userData.aimTime < acquisitionTime()
   ) {
     say("Hold aim until the yellow ring closes.");
     return;
@@ -1171,15 +1326,28 @@ function sting(controller) {
   totalStings++;
   proboscisUntil = now + 0.2;
 
+  const activatedPower = addBlood();
+
   resetAim();
 
   const remaining = roundTotal - roundCollected;
 
   if (remaining === 0) {
     nextRoundAt = now + CONFIG.nextRoundDelay;
-    say("Round complete! New targets incoming…", 1.8);
+
+    say(
+      activatedPower
+        ? "POWER-UP! Round complete — new targets incoming"
+        : "Round complete! New targets incoming…",
+      1.8
+    );
   } else {
-    say(`Collected! ${remaining} targets remaining.`);
+    say(
+      activatedPower
+        ? "POWER-UP! Faster acquisition for 8 seconds"
+        : `Collected! ${remaining} targets remaining.`,
+      activatedPower ? 2 : 1.3
+    );
   }
 
   const actuator = controller.userData.inputSource
@@ -1187,9 +1355,11 @@ function sting(controller) {
 
   if (actuator) {
     try {
-      Promise.resolve(actuator.pulse(0.4, 80)).catch(() => {});
+      Promise.resolve(
+        actuator.pulse(activatedPower ? 0.7 : 0.4, 100)
+      ).catch(() => {});
     } catch {
-      // Optional feedback.
+      // Optional vibration.
     }
   }
 }
@@ -1228,10 +1398,15 @@ for (let i = 0; i < 2; i++) {
     dot.visible = false;
   });
 
-  controller.addEventListener("selectstart", () => sting(controller));
+  controller.addEventListener(
+    "selectstart",
+    () => sting(controller)
+  );
 
   controller.addEventListener("squeezestart", () => {
-    if (controller.userData.inputSource?.handedness === "left") {
+    if (
+      controller.userData.inputSource?.handedness === "left"
+    ) {
       toggleSound();
     } else {
       manualRound();
@@ -1259,22 +1434,25 @@ for (let i = 0; i < 2; i++) {
 // ANIMATION
 // ============================================================
 
-function updateAim(delta) {
+function updateAim(delta, trackingAvailable) {
   for (const host of hosts) {
     host.userData.aimed = false;
     host.userData.focus = 0;
     host.userData.ready = false;
   }
 
-  for (const controller of controllers) {
-    const hit = session && !endingForError
-      ? getHit(controller)
-      : null;
+  if (!trackingAvailable) {
+    resetAim();
+    return;
+  }
 
+  for (const controller of controllers) {
+    const hit = getHit(controller);
     const host = hit?.object.userData.host || null;
     const data = controller.userData;
 
     data.dot.visible = Boolean(hit);
+
     if (hit) data.dot.position.copy(hit.point);
 
     if (data.host !== host) {
@@ -1290,9 +1468,10 @@ function updateAim(delta) {
     data.aimTime += delta;
 
     host.userData.aimed = true;
+
     host.userData.focus = Math.max(
       host.userData.focus,
-      Math.min(1, data.aimTime / CONFIG.acquisitionSeconds)
+      Math.min(1, data.aimTime / acquisitionTime())
     );
 
     host.userData.ready = host.userData.focus >= 1;
@@ -1301,12 +1480,16 @@ function updateAim(delta) {
 
 function animateHost(host) {
   const data = host.userData;
+
   data.heat.uniforms.time.value = now + data.phase;
+  data.heat.uniforms.power.value = isPowered() ? 1 : 0;
 
   if (data.collected) {
     const age = now - data.collectedAt;
 
-    data.heat.uniforms.flash.value = Math.max(0, 1 - age / 0.45);
+    data.heat.uniforms.flash.value =
+      Math.max(0, 1 - age / 0.45);
+
     data.heat.uniforms.focus.value = 0;
 
     data.segments.visible = false;
@@ -1315,33 +1498,49 @@ function animateHost(host) {
     data.ripple.visible = age < 0.65;
 
     if (data.ripple.visible) {
-      // Keep the feedback footprint within the inward margin.
       data.ripple.scale.setScalar(1 + age * 3);
-      data.ripple.material.opacity = (1 - age / 0.65) * 0.9;
+
+      data.ripple.material.opacity =
+        (1 - age / 0.65) * 0.9;
     }
 
     if (age >= 0.65) host.visible = false;
     return;
   }
 
+  // The host's position is not animated.
+  // Only rings and scent particles move.
   data.heat.uniforms.focus.value = data.focus;
   data.heat.uniforms.flash.value = 0;
-  data.core.material.opacity = 0.45 + data.focus * 0.55;
+
+  data.core.material.opacity =
+    0.45 + data.focus * 0.55;
 
   data.segments.visible = !data.ready;
   data.closedRing.visible = data.ready;
-  data.segments.rotation.z = now * 0.4;
-  data.segments.scale.setScalar(1.25 - data.focus * 0.25);
+
+  data.segments.rotation.z =
+    now * (isPowered() ? 0.9 : 0.4);
+
+  data.segments.scale.setScalar(
+    1.25 - data.focus * 0.25
+  );
 
   for (const segment of data.segments.children) {
     segment.material.color.setHex(
-      data.aimed ? COLOR.orange : COLOR.magenta
+      isPowered()
+        ? COLOR.yellow
+        : data.aimed
+          ? COLOR.orange
+          : COLOR.magenta
     );
   }
 
-  // Mainly vertical scent trails: no long path outside the boundary.
   for (let i = 0; i < CONFIG.scentParticles; i++) {
-    const u = (i / CONFIG.scentParticles + now * 0.12) % 1;
+    const u = (
+      i / CONFIG.scentParticles + now * 0.12
+    ) % 1;
+
     const swirl = u * Math.PI * 3 + data.phase;
     const index = i * 3;
 
@@ -1356,8 +1555,13 @@ function animateHost(host) {
   }
 
   data.scent.geometry.attributes.position.needsUpdate = true;
+
   data.scent.material.color.setHex(
-    data.aimed ? COLOR.orange : COLOR.magenta
+    isPowered()
+      ? COLOR.yellow
+      : data.aimed
+        ? COLOR.orange
+        : COLOR.magenta
   );
 }
 
@@ -1369,7 +1573,9 @@ function nearestDirection() {
     if (host.userData.collected) continue;
 
     host.userData.patch.getWorldPosition(temporary);
-    const candidateDistance = temporary.distanceTo(headPosition);
+
+    const candidateDistance =
+      temporary.distanceTo(headPosition);
 
     if (candidateDistance < distance) {
       distance = candidateDistance;
@@ -1385,6 +1591,7 @@ function nearestDirection() {
   nearest.userData.patch.getWorldPosition(temporary);
 
   inverseHead.copy(headQuaternion).invert();
+
   temporary.sub(headPosition)
     .applyQuaternion(inverseHead)
     .normalize();
@@ -1408,24 +1615,45 @@ function nearestDirection() {
 }
 
 // ============================================================
-// XR SESSION
+// BOUNDARY RESET HANDLING
 // ============================================================
 
 function onReferenceReset() {
-  // Remove old-coordinate targets immediately.
+  // Remove targets immediately because their coordinates may
+  // no longer match the current play-area reference space.
   clearHosts();
-  atmosphere.visible = false;
+
+  boundary = [];
+  boundarySignature = "";
   nextRoundAt = null;
   needsRound = true;
+
+  say("Boundary changed — checking a fresh layout.");
 }
 
+function clearBoundaryState() {
+  boundary = [];
+  boundarySignature = "";
+  referenceSpace = null;
+  nextBoundaryCheck = 0;
+  needsRound = false;
+}
+
+// ============================================================
+// XR STARTUP
+// ============================================================
+
 startButton.addEventListener("click", async () => {
-  if (session) return;
+  if (session || starting) return;
 
+  starting = true;
+  stopping = false;
   startButton.disabled = true;
-  endingForError = false;
 
-  // Audio creation/resume happens inside the user gesture.
+  clearHosts();
+  clearBoundaryState();
+
+  // Must be initiated from the user's button click.
   prepareAudio();
 
   let requestedSession = null;
@@ -1440,79 +1668,95 @@ startButton.addEventListener("click", async () => {
 
     session = requestedSession;
 
-    session.addEventListener("visibilitychange", () => {
+    requestedSession.addEventListener("visibilitychange", () => {
       resetAim();
+      previousTime = null;
       updateAudio();
     });
 
-    session.addEventListener("end", () => {
-      referenceSpace?.removeEventListener("reset", onReferenceReset);
+    requestedSession.addEventListener("end", () => {
+      referenceSpace?.removeEventListener(
+        "reset",
+        onReferenceReset
+      );
 
       session = null;
-      referenceSpace = null;
-      boundary = [];
-      needsRound = false;
       nextRoundAt = null;
 
       clearHosts();
-      atmosphere.visible = false;
+      clearBoundaryState();
       silenceAudio();
 
       panel.style.display = "";
       startButton.disabled = false;
-      startButton.textContent = "Enter Sensory V10";
+      startButton.textContent = "Enter Sensory V11";
 
-      if (!endingForError) {
-        statusText.textContent = "Session ended.";
+      if (!stopping) {
+        statusText.textContent =
+          "Session ended. Boundary will be checked again on entry.";
       }
     });
 
-    await renderer.xr.setSession(session);
+    await renderer.xr.setSession(requestedSession);
 
     referenceSpace = renderer.xr.getReferenceSpace();
+
+    // Fresh data from this session, not a previous visit.
     readBoundary();
 
-    referenceSpace.addEventListener("reset", onReferenceReset);
+    referenceSpace.addEventListener(
+      "reset",
+      onReferenceReset
+    );
 
     roundNumber = 0;
     roundTotal = 0;
     roundCollected = 0;
     totalStings = 0;
 
+    bloodLevel = 0;
+    powerUntil = 0;
+
     previousTime = null;
     nextRoundAt = null;
     feedbackUntil = 0;
+    proboscisUntil = 0;
     lastManualRound = -Infinity;
 
     needsRound = true;
+    nextBoundaryCheck = 0;
 
     panel.style.display = "none";
     updateAudio();
   } catch (error) {
-    endingForError = true;
+    stopping = true;
     silenceAudio();
 
     if (requestedSession) {
       try {
         await requestedSession.end();
       } catch {
-        // Preserve the original error.
+        // Preserve the original startup error.
       }
     }
 
     session = null;
-    referenceSpace = null;
+    clearHosts();
+    clearBoundaryState();
 
     panel.style.display = "";
     startButton.disabled = false;
-    startButton.textContent = "Try Sensory V10 again";
+    startButton.textContent = "Try Sensory V11 again";
 
     statusText.textContent =
-      "Could not start boundary-aware AR. " +
-      "The browser must expose bounded-floor play-area data. " +
-      "No guessed boundary is used. Details: " + error.message;
+      "Boundary-aware AR could not start. " +
+      "This browser must expose bounded-floor data. " +
+      "No saved or guessed boundary is used. Details: " +
+      error.message;
 
     console.error(error);
+  } finally {
+    starting = false;
   }
 });
 
@@ -1529,69 +1773,100 @@ renderer.setAnimationLoop((milliseconds, frame) => {
 
   previousTime = now;
 
-  if (frame && referenceSpace && !endingForError) {
+  let trackingAvailable = false;
+
+  if (
+    frame &&
+    referenceSpace &&
+    session?.visibilityState === "visible" &&
+    !stopping
+  ) {
     const pose = frame.getViewerPose(referenceSpace);
 
     if (pose) {
+      trackingAvailable = true;
+
       const p = pose.transform.position;
       const q = pose.transform.orientation;
 
       headPosition.set(p.x, p.y, p.z);
       headQuaternion.set(q.x, q.y, q.z, q.w);
 
-      if (
-        needsRound ||
-        (nextRoundAt !== null && now >= nextRoundAt)
-      ) {
-        try {
+      try {
+        // Also detect changed boundary geometry periodically.
+        if (now >= nextBoundaryCheck) {
+          const previousSignature = boundarySignature;
+          const currentSignature = readBoundary();
+
+          nextBoundaryCheck = now + 1;
+
+          if (
+            previousSignature &&
+            previousSignature !== currentSignature
+          ) {
+            clearHosts();
+            nextRoundAt = null;
+            needsRound = true;
+          }
+        }
+
+        if (
+          needsRound ||
+          (nextRoundAt !== null && now >= nextRoundAt)
+        ) {
           startRound();
           needsRound = false;
-        } catch (error) {
-          void stopWithError(error);
         }
+      } catch (error) {
+        trackingAvailable = false;
+        void stopWithError(error);
       }
-    } else {
-      resetAim();
     }
   }
 
-  updateAim(delta);
+  updatePower();
 
-  for (const host of hosts) animateHost(host);
+  updateAim(
+    delta,
+    trackingAvailable && !needsRound && !stopping
+  );
 
-  for (let i = 0; i < atmosphereSeeds.length; i++) {
-    const seed = atmosphereSeeds[i];
-    const index = i * 3;
-
-    // Horizontal positions stay fixed within the safe polygon.
-    atmospherePositions[index] = seed.x;
-    atmospherePositions[index + 1] =
-      seed.y + Math.sin(now * 0.4 + seed.phase) * 0.08;
-    atmospherePositions[index + 2] = seed.z;
+  for (const host of hosts) {
+    animateHost(host);
   }
 
-  atmosphereGeometry.attributes.position.needsUpdate = true;
-
   scene.updateMatrixWorld(true);
+
   let message = nearestDirection();
 
   if (!session) {
-    message = "Enter AR to read the play-area boundary";
+    message = "Enter AR to check a fresh boundary";
+  } else if (!trackingAvailable) {
+    message = "Waiting for headset tracking";
   } else if (nextRoundAt !== null) {
     message = "Round complete — new targets incoming";
   } else if (hosts.some((host) => host.userData.ready)) {
-    message = "Target acquired — press trigger";
+    message = isPowered()
+      ? "POWER ACTIVE — press trigger!"
+      : "Target acquired — press trigger";
   } else if (hosts.some((host) => host.userData.aimed)) {
     message = "Hold aim until the yellow ring closes";
   }
 
-  if (now < feedbackUntil) message = feedback;
+  if (now < feedbackUntil) {
+    message = feedback;
+  }
 
-  proboscis.scale.z = now < proboscisUntil ? 1.35 : 1;
+  proboscis.scale.z =
+    now < proboscisUntil ? 1.35 : 1;
 
   drawHUD(message);
   renderer.render(scene, camera);
 });
+
+// ============================================================
+// RESIZE / LEAVING PAGE
+// ============================================================
 
 window.addEventListener("resize", () => {
   if (renderer.xr.isPresenting) return;
@@ -1601,10 +1876,20 @@ window.addEventListener("resize", () => {
   renderer.setSize(innerWidth, innerHeight);
 });
 
+window.addEventListener("pagehide", () => {
+  silenceAudio();
+
+  boundary = [];
+  boundarySignature = "";
+
+  if (session) {
+    session.end().catch(() => {});
+  }
+});
+
 // ============================================================
 // SUPPORT CHECK
-// This checks AR support, not guaranteed boundary availability.
-// Boundary availability is checked when entering the session.
+// Actual boundary access is checked on every AR entry.
 // ============================================================
 
 async function checkSupport() {
@@ -1616,8 +1901,10 @@ async function checkSupport() {
 
   if (!navigator.xr) {
     startButton.textContent = "Open on Quest";
+
     statusText.textContent =
       "WebXR is unavailable. No boundary or targets were generated.";
+
     return;
   }
 
@@ -1627,21 +1914,25 @@ async function checkSupport() {
 
     if (!supported) {
       startButton.textContent = "AR unavailable";
-      statusText.textContent = "This browser does not report AR support.";
+
+      statusText.textContent =
+        "This browser does not report immersive AR support.";
+
       return;
     }
 
     startButton.disabled = false;
-    startButton.textContent = "Enter Sensory V10";
+    startButton.textContent = "Enter Sensory V11";
 
     statusText.textContent =
-      "5–20 targets. Boundary access is checked on entry. " +
-      "Left grip: sound. Right grip: new round.";
+      "Fresh boundary check on entry. " +
+      "5–20 spaced targets. Hits charge blood and power.";
   } catch (error) {
-    statusText.textContent = "Support check failed: " + error.message;
+    statusText.textContent =
+      "Support check failed: " + error.message;
   }
 }
 
 await checkSupport();
 
-// END OF MOSQUITO SENSORY V10
+// END OF MOSQUITO SENSORY V11
